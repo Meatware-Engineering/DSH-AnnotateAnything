@@ -1,0 +1,38 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: Test and verify bundled client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Build, test, and check syntax
+        run: npm run check
+      - name: Verify committed client.js matches source
+        shell: bash
+        run: |
+          git ls-files --error-unmatch client.js
+          if ! git diff --exit-code -- client.js; then
+            echo '::error file=client.js::The committed bundle is stale. Run npm ci && npm run build, then commit client.js with the source changes.'
+            exit 1
+          fi
