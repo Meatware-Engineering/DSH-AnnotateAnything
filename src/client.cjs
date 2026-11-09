@@ -1,12 +1,12 @@
 'use strict';
 
 const React = require('react');
-const { toPng } = require('html-to-image');
+const { captureDom, captureHostRegion, captureGuest } = require('./capture.cjs');
+const { clipRect, installRegionPicker } = require('./region.cjs');
 const { describeElement, dataUrlToBytes, formatAnnotations, clip } = require('./lib.cjs');
 const { MARK, GUEST_INSTALL, GUEST_REMOVE, GUEST_FREEZE, GUEST_RESUME } = require('./guest.cjs');
 
 const NS = 'annotateAnything';
-const MAX_SHOT_AREA = 2500000;
 const UI = '[data-annot-ui]';
 
 const CSS = `
@@ -19,6 +19,7 @@ const CSS = `
 .dsh-annot-bar__count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);font-weight:600}
 .dsh-annot-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-radius:7px;padding:4px 10px;font:12px/1.3 inherit;cursor:pointer;white-space:nowrap}
 .dsh-annot-btn:hover:enabled{background:var(--dsw-alias-bg-layer-2)}
+.dsh-annot-btn[aria-pressed=true]{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 .dsh-annot-btn:disabled{opacity:.5;cursor:default}
 .dsh-annot-btn--primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff)}
 .dsh-annot-btn--primary:hover:enabled{filter:brightness(1.06)}
@@ -71,22 +72,8 @@ function boxOf(rect) {
   const y = rect.y !== undefined ? rect.y : rect.top;
   const width = rect.width;
   const height = rect.height;
-  if (width < 1 || height < 1) return null;
+  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return null;
   return { x: x, y: y, width: width, height: height };
-}
-
-async function captureDom(el) {
-  const rect = el.getBoundingClientRect();
-  if (rect.width < 2 || rect.height < 2 || rect.width * rect.height > MAX_SHOT_AREA) return null;
-  const ratio = Math.min(2, Math.max(0.25, 1200 / Math.max(rect.width, rect.height)));
-  return await toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false });
-}
-
-async function captureGuest(wv, rect) {
-  if (!wv || typeof wv.capturePage !== 'function' || !rect) return null;
-  if (rect.width < 2 || rect.height < 2) return null;
-  const image = await wv.capturePage({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-  return image && typeof image.toDataURL === 'function' ? image.toDataURL() : null;
 }
 
 function Trigger({ props, store, t }) {
@@ -113,7 +100,8 @@ function Overlay({ ctx, store, t }) {
   const state = React.useSyncExternalStore(store.subscribe, store.get, store.get);
   const [hover, setHover] = React.useState(null);
   const [items, setItems] = React.useState([]);
-  const [draft, setDraft] = React.useState(null);
+  const [draft, setDraftState] = React.useState(null);
+  const [mode, setMode] = React.useState('element');
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
   const [, setTick] = React.useState(0);
@@ -122,6 +110,11 @@ function Overlay({ ctx, store, t }) {
   const itemsRef = React.useRef(items);
   const scrollRef = React.useRef(new Map());
   const guestsRef = React.useRef([]);
+  const epochRef = React.useRef(0);
+  const busyRef = React.useRef(busy);
+  busyRef.current = busy;
+  const regionPickerRef = React.useRef(null);
+  const setDraft = (value) => { draftRef.current = value; setDraftState(value); };
   draftRef.current = draft;
   itemsRef.current = items;
 
@@ -139,19 +132,22 @@ function Overlay({ ctx, store, t }) {
   const guestScroll = (wv) => scrollRef.current.get(wv) || { x: 0, y: 0 };
 
   /** Guest document coordinates -> window coordinates for the current scroll offset. */
-  const guestViewportRect = (wv, docRect) => {
+  const guestViewportRect = (wv, docRect, viewport) => {
     const outer = wv.getBoundingClientRect();
     const scroll = guestScroll(wv);
+    const sx = viewport ? outer.width / viewport.width : 1;
+    const sy = viewport ? outer.height / viewport.height : 1;
     return {
-      x: outer.left + docRect.x - scroll.x,
-      y: outer.top + docRect.y - scroll.y,
-      width: docRect.width,
-      height: docRect.height,
+      x: outer.left + (docRect.x - scroll.x) * sx,
+      y: outer.top + (docRect.y - scroll.y) * sy,
+      width: docRect.width * sx,
+      height: docRect.height * sy,
     };
   };
 
   const itemRect = (item) => {
-    if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect);
+    if (item.kind === 'region' && item.epoch !== epochRef.current) return null;
+    if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect, item.guestViewport);
     if (item.wv && item.guestRect) {
       const outer = item.wv.getBoundingClientRect();
       return { x: outer.left + item.guestRect.x, y: outer.top + item.guestRect.y, width: item.guestRect.width, height: item.guestRect.height };
@@ -165,7 +161,8 @@ function Overlay({ ctx, store, t }) {
 
   const draftRectOf = (value) => {
     if (!value) return null;
-    if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect);
+    if (value.kind === 'region' && value.epoch !== epochRef.current) return null;
+    if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect, value.guestViewport);
     if (value.el && value.el.isConnected) {
       const rect = value.el.getBoundingClientRect();
       return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
@@ -187,7 +184,7 @@ function Overlay({ ctx, store, t }) {
   const capture = async (item) => {
     let shot = null;
     try {
-      shot = item.wv ? await captureGuest(item.wv, item.guestRect) : await captureDom(item.el);
+      shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
     } catch (_error) {
       shot = null;
     }
@@ -198,6 +195,29 @@ function Overlay({ ctx, store, t }) {
   const openDraft = (payload) => {
     setError('');
     setDraft(payload);
+  };
+
+  const openRegion = (rect, wv, viewport) => {
+    if (draftRef.current || busyRef.current) return;
+    const current = {
+      id: 'a' + Math.random().toString(36).slice(2), kind: 'region', epoch: epochRef.current,
+      desc: { label: t('region.label'), rect: rect, surface: wv ? 'browser' : 'harness' },
+      rect: wv ? null : rect, wv: wv || null, guestRect: wv ? rect : null,
+      guestViewport: viewport, comment: '', shot: null, capturePending: true,
+      docRect: wv ? { ...rect, x: rect.x + viewport.x, y: rect.y + viewport.y } : null,
+    };
+    openDraft(current);
+    setHover(null);
+    const pending = wv ? captureGuest(wv, rect, viewport) : captureHostRegion(rect);
+    pending.then((shot) => {
+      if (draftRef.current?.id !== current.id || !store.get().active) return;
+      if (current.epoch !== epochRef.current || !shot) throw new Error('Selection moved');
+      setDraft({ ...draftRef.current, shot, capturePending: false });
+    }).catch(() => {
+      if (draftRef.current?.id !== current.id) return;
+      setDraft(null);
+      setError(t('error.captureFailed'));
+    });
   };
 
   const openGuestPick = (wv, payload) => {
@@ -216,6 +236,7 @@ function Overlay({ ctx, store, t }) {
       el: null,
       wv: wv,
       guestRect: payload.rect,
+      guestViewport: payload.viewport,
       docRect: docRect,
       rect: null,
       comment: '',
@@ -226,24 +247,14 @@ function Overlay({ ctx, store, t }) {
 
   const saveDraft = () => {
     const current = draftRef.current;
-    if (!current) return;
+    if (!current || current.capturePending || (current.kind === 'region' && !current.shot)) return;
     const exists = itemsRef.current.some((entry) => entry.id === current.id);
     if (exists) {
       setItems((prev) => prev.map((entry) => (entry.id === current.id ? Object.assign({}, entry, { comment: current.comment }) : entry)));
     } else {
-      const item = {
-        id: current.id,
-        desc: current.desc,
-        el: current.el,
-        wv: current.wv,
-        guestRect: current.guestRect,
-        docRect: current.docRect,
-        rect: current.rect,
-        comment: current.comment,
-        shot: current.shot || null,
-      };
+      const item = { ...current, editing: false };
       setItems(itemsRef.current.concat([item]));
-      capture(item).catch(() => {});
+      if (!item.shot) capture(item).catch(() => {});
     }
     setDraft(null);
   };
@@ -262,7 +273,7 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     if (!isActive) return undefined;
     const onMove = (event) => {
-      if (draftRef.current) return;
+      if (mode === 'region' || draftRef.current || busyRef.current) return;
       if (event.target instanceof Element && event.target.closest(UI)) return;
       const el = pickAt(event.clientX, event.clientY);
       if (!el) {
@@ -284,7 +295,7 @@ function Overlay({ ctx, store, t }) {
       if (event.target instanceof Element && event.target.closest(UI)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (draftRef.current) return;
+      if (mode === 'region' || draftRef.current || busyRef.current) return;
       const el = pickAt(event.clientX, event.clientY);
       if (!el) return;
       if (String(el.tagName).toLowerCase() === 'webview') {
@@ -305,10 +316,41 @@ function Overlay({ ctx, store, t }) {
     };
     const onKey = (event) => {
       if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (regionPickerRef.current?.cancel()) return;
       if (draftRef.current) setDraft(null);
       else store.set({ active: false });
     };
-    const onScroll = () => setTick((value) => value + 1);
+    const invalidate = () => {
+      epochRef.current += 1;
+      regionPickerRef.current?.cancel();
+      if (draftRef.current?.capturePending) setDraft(null);
+      setHover(null);
+      setTick((value) => value + 1);
+    };
+    const onScroll = (event) => {
+      if (event.target instanceof Element && event.target.closest(UI)) return;
+      invalidate();
+    };
+    const picker = installRegionPicker(document, {
+      enabled: () => mode === 'region',
+      ignore: (event) => event.target instanceof Element && !!event.target.closest(UI),
+      blocked: () => !!draftRef.current || busyRef.current,
+      bounds: () => ({ width: innerWidth, height: innerHeight }),
+      preview: setHover,
+      select: (rect) => {
+        // Cross-process surfaces must be selected inside their own viewport.
+        const overlapsGuest = Array.from(document.querySelectorAll('webview')).some((wv) => {
+          const b = wv.getBoundingClientRect();
+          return rect.x < b.right && rect.x + rect.width > b.left && rect.y < b.bottom && rect.y + rect.height > b.top;
+        });
+        if (overlapsGuest) { setError(t('error.guestHint')); return; }
+        openRegion(rect);
+      },
+    });
+    regionPickerRef.current = picker;
+    const onBlur = () => picker.cancel();
+    window.addEventListener('blur', onBlur);
 
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('mousedown', stop, true);
@@ -324,7 +366,7 @@ function Overlay({ ctx, store, t }) {
         const rect = wv.getBoundingClientRect();
         if (rect.width < 4 || rect.height < 4) continue;
         try {
-          const pending = wv.executeJavaScript(guestInstallScript());
+          const pending = wv.executeJavaScript(guestInstallScript(mode));
           if (pending && typeof pending.catch === 'function') pending.catch(() => {});
         } catch (_error) {
           /* guest annotation stays unavailable for this tab */
@@ -336,25 +378,36 @@ function Overlay({ ctx, store, t }) {
           if (!message) return;
           try {
             const payload = JSON.parse(message.slice(MARK.length));
-            if (payload && payload.kind === 'scroll') {
+            if (payload?.kind === 'escape') { onKey({ key: 'Escape', preventDefault() {}, stopImmediatePropagation() {} }); return; }
+            if (payload && ['scroll', 'ready'].includes(payload.kind)) {
+              if (payload.kind === 'scroll') invalidate();
               scrollRef.current.set(wv, { x: Number(payload.x) || 0, y: Number(payload.y) || 0 });
               setTick((value) => value + 1);
               return;
             }
-            if (!payload || payload.kind !== 'pick' || !payload.rect) return;
+            if (!payload || !['pick', 'region'].includes(payload.kind)) return;
+            const viewport = payload.viewport;
+            if (!viewport || typeof viewport.instance !== 'string' || !['width', 'height', 'x', 'y', 'revision'].every((key) => Number.isFinite(viewport[key]))) return;
+            const rect = clipRect(payload.rect, viewport.width, viewport.height, payload.kind === 'region' ? 4 : 2);
+            if (!rect) return;
+            scrollRef.current.set(wv, { x: viewport.x, y: viewport.y });
+            if (payload.kind === 'region') { if (mode === 'region') openRegion(rect, wv, viewport); return; }
+            if (mode !== 'element') return;
             openGuestPick(wv, {
               tag: clip(payload.tag, 40),
               label: clip(payload.label, 90),
               text: clip(payload.text, 200),
               selector: clip(payload.selector, 300),
-              rect: payload.rect,
-              scroll: payload.scroll,
+              rect: rect,
+              scroll: { x: viewport.x, y: viewport.y },
+              viewport: viewport,
             });
           } catch (_error) {
             /* ignore malformed guest payloads */
           }
         };
         wv.addEventListener('console-message', onMessage);
+        wv.addEventListener('did-start-navigation', invalidate);
         guests.push([wv, onMessage]);
       }
       guestsRef.current = guests;
@@ -363,6 +416,7 @@ function Overlay({ ctx, store, t }) {
       for (const pair of guests) {
         try {
           pair[0].removeEventListener('console-message', pair[1]);
+          pair[0].removeEventListener('did-start-navigation', invalidate);
           const pending = pair[0].executeJavaScript(GUEST_REMOVE);
           if (pending && typeof pending.catch === 'function') pending.catch(() => {});
         } catch (_error) {
@@ -374,6 +428,9 @@ function Overlay({ ctx, store, t }) {
     };
     install();
     return () => {
+      picker.destroy();
+      regionPickerRef.current = null;
+      window.removeEventListener('blur', onBlur);
       document.removeEventListener('mousemove', onMove, true);
       document.removeEventListener('mousedown', stop, true);
       document.removeEventListener('pointerdown', stop, true);
@@ -383,7 +440,11 @@ function Overlay({ ctx, store, t }) {
       window.removeEventListener('resize', onScroll, true);
       uninstall();
     };
-  }, [isActive, store, t]);
+  }, [isActive, mode, store, t]);
+
+  React.useEffect(() => {
+    if (!isActive) { setDraft(null); setItems([]); setHover(null); }
+  }, [isActive]);
 
   // Freeze the guest highlight while a comment card is open so the marked
   // region stops following the pointer until the comment is settled.
@@ -407,9 +468,9 @@ function Overlay({ ctx, store, t }) {
       for (let index = 0; index < itemsRef.current.length; index += 1) {
         const item = itemsRef.current[index];
         let shot = item.shot;
-        if (!shot) {
+        if (!shot && item.kind !== 'region') {
           try {
-            shot = item.wv ? await captureGuest(item.wv, item.guestRect) : await captureDom(item.el);
+            shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
           } catch (_error) {
             shot = null;
           }
@@ -448,9 +509,18 @@ function Overlay({ ctx, store, t }) {
     React.createElement(
       'div',
       { key: 'bar', 'data-annot-ui': 'bar', className: 'dsh-annot-bar' },
-      React.createElement('span', { className: 'dsh-annot-bar__hint' }, t(draft ? 'bar.hintDraft' : 'bar.hint')),
+      React.createElement('span', { className: 'dsh-annot-bar__hint' }, t(draft ? (draft.capturePending ? 'bar.capturing' : 'bar.hintDraft') : (mode === 'region' ? 'bar.regionHint' : 'bar.hint'))),
+      ...['element', 'region'].map((value) => React.createElement('button', {
+        key: value, type: 'button', className: 'dsh-annot-btn', 'aria-pressed': mode === value,
+        disabled: !!draft || busy, onClick: () => { setHover(null); setMode(value); },
+      }, t('mode.' + value))),
       React.createElement('span', { className: 'dsh-annot-bar__count' }, String(items.length)),
-      React.createElement('button', { key: 'send', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: items.length === 0 || busy, onClick: send }, busy ? t('bar.sending') : t('bar.send', { count: items.length })),
+      ...items.flatMap((item, index) => item.kind === 'region' && item.epoch !== epochRef.current ? [
+        React.createElement('button', { key: item.id, className: 'dsh-annot-btn', disabled: busy || !!draft,
+          title: item.comment || t('pin.empty'), 'aria-label': t('pin.edit', { index: index + 1 }),
+          onClick: () => openDraft({ ...item, editing: true }) }, String(index + 1)),
+      ] : []),
+      React.createElement('button', { key: 'send', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: items.length === 0 || busy || !!draft, onClick: send }, busy ? t('bar.sending') : t('bar.send', { count: items.length })),
       React.createElement('button', { key: 'close', className: 'dsh-annot-btn', onClick: () => { setItems([]); setDraft(null); store.set({ active: false }); } }, t('bar.close')),
     ),
   );
@@ -499,6 +569,7 @@ function Overlay({ ctx, store, t }) {
           className: 'dsh-annot-pin',
           style: { left: Math.max(0, rect.x - 11), top: Math.max(0, rect.y - 11) },
           title: item.comment || t('pin.empty'),
+          disabled: busy,
           onClick: () => openDraft(Object.assign({}, item, { editing: true })),
         },
         String(index + 1),
@@ -525,7 +596,8 @@ function Overlay({ ctx, store, t }) {
           value: draft.comment,
           onChange: (event) => setDraft(Object.assign({}, draftRef.current, { comment: event.target.value })),
         }),
-        React.createElement('div', { className: 'dsh-annot-card__where' }, (draft.desc && draft.desc.selector) || ''),
+        React.createElement('div', { className: 'dsh-annot-card__where' }, draft.kind === 'region'
+          ? t('prompt.region', { surface: draft.desc.surface, ...draft.desc.rect }) : (draft.desc && draft.desc.selector) || ''),
         React.createElement(
           'div',
           { className: 'dsh-annot-card__rows' },
@@ -533,7 +605,7 @@ function Overlay({ ctx, store, t }) {
           draft.editing
             ? React.createElement('button', { key: 'delete', className: 'dsh-annot-btn dsh-annot-btn--danger', onClick: () => removeItem(draft.id) }, t('card.delete'))
             : null,
-          React.createElement('button', { key: 'save', className: 'dsh-annot-btn dsh-annot-btn--primary', onClick: saveDraft }, t('card.save')),
+          React.createElement('button', { key: 'save', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: !!draft.capturePending, onClick: saveDraft }, t('card.save')),
         ),
       ),
     );
@@ -545,12 +617,12 @@ function Overlay({ ctx, store, t }) {
 }
 
 /** The guest document cannot read Harness theme tokens, so the accent is passed in. */
-function guestInstallScript() {
+function guestInstallScript(mode) {
   const root = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (root.getPropertyValue(name) || '').trim() || fallback;
   const accent = read('--dsw-alias-button-primary-fill', read('--dsw-alias-brand-primary', '#3b82f6'));
   const onAccent = read('--dsw-alias-label-primary-foreground', '#fff');
-  return GUEST_INSTALL.split('__ACCENT__').join(accent).split('__ON_ACCENT__').join(onAccent);
+  return GUEST_INSTALL.replace('__MODE__', mode || 'element').split('__ACCENT__').join(accent).split('__ON_ACCENT__').join(onAccent);
 }
 
 function apply(ctx) {
@@ -591,6 +663,12 @@ function apply(ctx) {
 const DICT_EN = {
   'trigger.title': 'Annotate',
   'bar.hint': 'Click an element to annotate it',
+  'mode.element': 'Element',
+  'mode.region': 'Region',
+  'region.label': 'Selected region',
+  'bar.regionHint': 'Drag to select a visible region',
+  'bar.capturing': 'Capturing…',
+  'prompt.region': '   {surface} region (CSS px): x={x}, y={y}, width={width}, height={height}',
   'bar.hintDraft': 'Describe the annotation',
   'bar.send': 'Send {count}',
   'bar.sending': 'Sending…',
@@ -600,6 +678,7 @@ const DICT_EN = {
   'card.cancel': 'Cancel',
   'card.delete': 'Delete',
   'pin.empty': 'No comment',
+  'pin.edit': 'Edit annotation {index}',
   'error.noSession': 'Open a chat before sending annotations',
   'error.sendFailed': 'The annotations were not sent',
   'error.unsupportedApi': 'This Harness version does not support sending image drafts. Update Harness before sending.',
@@ -615,6 +694,12 @@ const DICT_EN = {
 const DICT_RU = {
   'trigger.title': 'Аннотировать',
   'bar.hint': 'Нажмите на элемент, чтобы аннотировать его',
+  'mode.element': 'Элемент',
+  'mode.region': 'Область',
+  'region.label': 'Выделенная область',
+  'bar.regionHint': 'Зажмите кнопку и выделите область',
+  'bar.capturing': 'Снимок…',
+  'prompt.region': '   Область {surface} (CSS px): x={x}, y={y}, ширина={width}, высота={height}',
   'bar.hintDraft': 'Опишите, что здесь не так',
   'bar.send': 'Отправить ({count})',
   'bar.sending': 'Отправка…',
@@ -624,6 +709,7 @@ const DICT_RU = {
   'card.cancel': 'Отмена',
   'card.delete': 'Удалить',
   'pin.empty': 'Без комментария',
+  'pin.edit': 'Изменить аннотацию {index}',
   'error.noSession': 'Сначала откройте чат, чтобы отправить аннотации',
   'error.sendFailed': 'Аннотации не отправились',
   'error.unsupportedApi': 'Эта версия Harness не поддерживает отправку изображений через drafts. Обновите Harness.',

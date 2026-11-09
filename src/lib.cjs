@@ -97,6 +97,7 @@ function formatAnnotations(items, t) {
   items.forEach((item, index) => {
     const label = item.desc && item.desc.label ? item.desc.label : (item.desc && item.desc.tag) || '';
     lines.push(t('prompt.item', { index: index + 1, label: label, comment: String(item.comment || '').trim() || '—' }));
+    if (item.kind === 'region' && item.desc && item.desc.rect) lines.push(t('prompt.region', { surface: item.desc.surface, ...item.desc.rect }));
     if (item.desc && item.desc.selector) lines.push(t('prompt.where', { selector: item.desc.selector, tag: item.desc.tag }));
   });
   return lines.join('\n');

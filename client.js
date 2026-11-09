@@ -2039,7 +2039,7 @@ var require_lib = __commonJS({
       });
     }
     exports2.toPixelData = toPixelData;
-    function toPng2(node, options) {
+    function toPng(node, options) {
       if (options === void 0) {
         options = {};
       }
@@ -2056,7 +2056,7 @@ var require_lib = __commonJS({
         });
       });
     }
-    exports2.toPng = toPng2;
+    exports2.toPng = toPng;
     function toJpeg(node, options) {
       if (options === void 0) {
         options = {};
@@ -2107,6 +2107,248 @@ var require_lib = __commonJS({
       });
     }
     exports2.getFontEmbedCSS = getFontEmbedCSS;
+  }
+});
+
+// src/region.cjs
+var require_region = __commonJS({
+  "src/region.cjs"(exports2, module2) {
+    "use strict";
+    function clipRect2(rect, width, height, minimum = 1) {
+      if (!rect || ![rect.x, rect.y, rect.width, rect.height, width, height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null;
+      const x = Math.max(0, Math.min(width, rect.x));
+      const y = Math.max(0, Math.min(height, rect.y));
+      const right = Math.max(0, Math.min(width, rect.x + rect.width));
+      const bottom = Math.max(0, Math.min(height, rect.y + rect.height));
+      if (right - x < minimum || bottom - y < minimum) return null;
+      return { x, y, width: right - x, height: bottom - y };
+    }
+    function dragRect(start, end, width, height, minimum = 4) {
+      return clipRect2({
+        x: Math.min(start.x, end.x),
+        y: Math.min(start.y, end.y),
+        width: Math.abs(end.x - start.x),
+        height: Math.abs(end.y - start.y)
+      }, width, height, minimum);
+    }
+    function pixelRect(rect, viewport, image) {
+      const box = clipRect2(rect, viewport.width, viewport.height);
+      if (!box || ![image.width, image.height].every(Number.isFinite) || image.width <= 0 || image.height <= 0) return null;
+      const sx = image.width / viewport.width, sy = image.height / viewport.height;
+      const x = Math.floor(box.x * sx), y = Math.floor(box.y * sy);
+      return {
+        x,
+        y,
+        width: Math.ceil((box.x + box.width) * sx) - x,
+        height: Math.ceil((box.y + box.height) * sy) - y
+      };
+    }
+    function installRegionPicker2(target, options) {
+      let drag = null;
+      const swallow = (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      const cancel = () => {
+        const previous = drag;
+        drag = null;
+        if (previous) {
+          try {
+            previous.target.releasePointerCapture(previous.id);
+          } catch (_) {
+          }
+          options.preview(null);
+        }
+        return !!previous;
+      };
+      const down = (event) => {
+        if (!options.enabled() || options.ignore(event)) return;
+        swallow(event);
+        if (event.button !== 0 || event.isPrimary === false || options.blocked()) return;
+        cancel();
+        drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target };
+        try {
+          event.target.setPointerCapture(event.pointerId);
+        } catch (_) {
+        }
+      };
+      const move = (event) => {
+        if (!drag || drag.id !== event.pointerId) return;
+        swallow(event);
+        if (event.buttons === 0) {
+          cancel();
+          return;
+        }
+        const bounds = options.bounds();
+        options.preview(dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height, 1));
+      };
+      const up = (event) => {
+        if (!drag || drag.id !== event.pointerId) return;
+        swallow(event);
+        const bounds = options.bounds();
+        const rect = dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height);
+        cancel();
+        if (rect) options.select(rect);
+      };
+      const lost = (event) => {
+        if (drag && drag.id === event.pointerId) cancel();
+      };
+      const listeners = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: lost, lostpointercapture: lost };
+      Object.entries(listeners).forEach(([name, handler]) => target.addEventListener(name, handler, true));
+      return { cancel, destroy() {
+        cancel();
+        Object.entries(listeners).forEach(([name, handler]) => target.removeEventListener(name, handler, true));
+      } };
+    }
+    module2.exports = { clipRect: clipRect2, dragRect, pixelRect, installRegionPicker: installRegionPicker2 };
+  }
+});
+
+// src/capture.cjs
+var require_capture = __commonJS({
+  "src/capture.cjs"(exports2, module2) {
+    "use strict";
+    var { toPng, toSvg } = require_lib();
+    var { clipRect: clipRect2, pixelRect } = require_region();
+    var MAX_SHOT_AREA = 25e5;
+    var UI2 = "[data-annot-ui]";
+    async function cropDataUrl(data, rect, viewport) {
+      const image = new Image();
+      image.src = data;
+      await image.decode();
+      const crop = pixelRect(rect, viewport, { width: image.naturalWidth, height: image.naturalHeight });
+      if (!crop) throw new Error("Invalid screenshot bounds");
+      const canvas = document.createElement("canvas");
+      const scale = Math.min(1, 1600 / Math.max(crop.width, crop.height));
+      canvas.width = Math.max(1, Math.round(crop.width * scale));
+      canvas.height = Math.max(1, Math.round(crop.height * scale));
+      canvas.getContext("2d").drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/png");
+    }
+    async function captureDom2(el) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2 || rect.width * rect.height > MAX_SHOT_AREA) return null;
+      const ratio = Math.min(2, Math.max(0.25, 1200 / Math.max(rect.width, rect.height)));
+      return toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false, filter: (node) => !node.matches?.(UI2) });
+    }
+    async function captureHostRegion2(rect) {
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      const box = clipRect2(rect, viewport.width, viewport.height, 4);
+      if (!box || box.width * box.height > MAX_SHOT_AREA) throw new Error("Invalid region size");
+      const marker = "data-annot-scroll-" + Math.random().toString(36).slice(2);
+      const scrollers = [];
+      const positioned = [];
+      for (const node of document.querySelectorAll("*")) {
+        if (!node.closest(UI2) && (node.scrollTop || node.scrollLeft)) {
+          node.setAttribute(marker, String(scrollers.length));
+          scrollers.push({ node, x: node.scrollLeft, y: node.scrollTop, width: node.scrollWidth, height: node.scrollHeight });
+        }
+      }
+      for (const node of document.querySelectorAll("*")) {
+        if (node.closest(UI2) || !scrollers.some((entry) => entry.node.contains(node))) continue;
+        if (!["fixed", "sticky"].includes(getComputedStyle(node).position)) continue;
+        node.setAttribute(marker + "-position", String(positioned.length));
+        positioned.push({ node, rect: node.getBoundingClientRect() });
+      }
+      let data;
+      try {
+        data = await toSvg(document.documentElement, {
+          width: viewport.width,
+          height: viewport.height,
+          skipFonts: true,
+          cacheBust: false,
+          filter: (node) => !node.matches?.(UI2)
+        });
+      } finally {
+        scrollers.forEach(({ node }) => node.removeAttribute(marker));
+        positioned.forEach(({ node }) => node.removeAttribute(marker + "-position"));
+      }
+      const svg = new DOMParser().parseFromString(decodeURIComponent(data.slice(data.indexOf(",") + 1)), "image/svg+xml");
+      for (const [index, scroll] of scrollers.entries()) {
+        const node = svg.querySelector("[" + marker + '="' + index + '"]');
+        if (!node) continue;
+        const inner = svg.createElementNS("http://www.w3.org/1999/xhtml", "div");
+        for (const key of [
+          "display",
+          "flexDirection",
+          "flexWrap",
+          "alignItems",
+          "alignContent",
+          "justifyContent",
+          "justifyItems",
+          "gap",
+          "gridTemplateColumns",
+          "gridTemplateRows",
+          "gridAutoColumns",
+          "gridAutoRows",
+          "gridAutoFlow",
+          "padding",
+          "writingMode"
+        ]) inner.style[key] = node.style[key];
+        while (node.firstChild) inner.appendChild(node.firstChild);
+        Object.assign(inner.style, {
+          position: "relative",
+          top: "0",
+          left: "0",
+          margin: "0",
+          border: "0",
+          width: scroll.width + "px",
+          height: scroll.height + "px",
+          boxSizing: "border-box",
+          overflow: "visible",
+          transform: `translate(${-scroll.x}px, ${-scroll.y}px)`
+        });
+        Object.assign(node.style, { display: "block", padding: "0", paddingBlock: "0", paddingInline: "0", overflow: "hidden" });
+        node.appendChild(inner);
+      }
+      for (const [index, entry] of positioned.entries()) {
+        const node = svg.querySelector("[" + marker + '-position="' + index + '"]');
+        if (!node) continue;
+        const placeholder = node.cloneNode(true);
+        placeholder.style.visibility = "hidden";
+        placeholder.removeAttribute(marker + "-position");
+        placeholder.querySelectorAll("[" + marker + "-position]").forEach((child) => child.removeAttribute(marker + "-position"));
+        node.replaceWith(placeholder);
+        const { x, y, width, height } = entry.rect;
+        const values = {
+          position: "absolute",
+          inset: `${y}px auto auto ${x}px`,
+          insetBlock: `${y}px auto`,
+          insetInline: `${x}px auto`,
+          margin: "0",
+          marginBlock: "0",
+          marginInline: "0",
+          width: width + "px",
+          inlineSize: width + "px",
+          height: height + "px",
+          blockSize: height + "px",
+          boxSizing: "border-box",
+          transform: "none"
+        };
+        for (const [key, value] of Object.entries(values)) node.style.setProperty(key.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()), value, "important");
+        svg.querySelector("foreignObject").firstElementChild.appendChild(node);
+      }
+      data = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+      return cropDataUrl(data, box, viewport);
+    }
+    async function captureGuest2(wv, rect, expected) {
+      if (!wv || typeof wv.capturePage !== "function") throw new Error("Guest capture unavailable");
+      const prepare = `window.__dshAnnotate && window.__dshAnnotate.prepareCapture(${JSON.stringify(expected || null)})`;
+      try {
+        const viewport = await wv.executeJavaScript(prepare);
+        const box = viewport && clipRect2(rect, viewport.width, viewport.height, 2);
+        if (!box || box.width * box.height > MAX_SHOT_AREA) throw new Error("Guest selection changed");
+        const image = await wv.capturePage();
+        const shot = await cropDataUrl(image.toDataURL(), box, viewport);
+        const valid = await wv.executeJavaScript(`window.__dshAnnotate && window.__dshAnnotate.captureValid(${JSON.stringify(viewport)})`);
+        if (!valid) throw new Error("Guest moved during capture");
+        return shot;
+      } finally {
+        await wv.executeJavaScript("window.__dshAnnotate && window.__dshAnnotate.finishCapture()").catch(() => {
+        });
+      }
+    }
+    module2.exports = { cropDataUrl, captureDom: captureDom2, captureHostRegion: captureHostRegion2, captureGuest: captureGuest2 };
   }
 });
 
@@ -2197,6 +2439,7 @@ var require_lib2 = __commonJS({
       items.forEach((item, index) => {
         const label = item.desc && item.desc.label ? item.desc.label : item.desc && item.desc.tag || "";
         lines.push(t("prompt.item", { index: index + 1, label, comment: String(item.comment || "").trim() || "\u2014" }));
+        if (item.kind === "region" && item.desc && item.desc.rect) lines.push(t("prompt.region", { surface: item.desc.surface, ...item.desc.rect }));
         if (item.desc && item.desc.selector) lines.push(t("prompt.where", { selector: item.desc.selector, tag: item.desc.tag }));
       });
       return lines.join("\n");
@@ -2218,9 +2461,20 @@ var require_lib2 = __commonJS({
 var require_guest = __commonJS({
   "src/guest.cjs"(exports2, module2) {
     "use strict";
+    var { clipRect: clipRect2, dragRect, installRegionPicker: installRegionPicker2 } = require_region();
     var MARK2 = "__DSH_ANNOTATE__";
     var GUEST_INSTALL2 = `(function () {
   var MARK = '${MARK2}';
+  var clipRect = ${clipRect2.toString()};
+  var dragRect = ${dragRect.toString()};
+  var installRegionPicker = ${installRegionPicker2.toString()};
+  var mode = '__MODE__';
+  var revision = 0;
+  var instance = Math.random().toString(36).slice(2);
+  var capturing = false;
+  function viewport() { return { width: innerWidth, height: innerHeight, x: scrollX, y: scrollY, revision: revision, instance: instance }; }
+  function emit(payload) { console.log(MARK + JSON.stringify(payload)); }
+  function hide() { box.style.display = 'none'; label.style.display = 'none'; }
   if (window.__dshAnnotate) { try { window.__dshAnnotate.destroy(); } catch (error) {} }
   var HIT = 'position:fixed;pointer-events:none;border:2px solid __ACCENT__;background:color-mix(in srgb,__ACCENT__ 16%,transparent);border-radius:3px;z-index:2147483647;display:none;box-sizing:border-box';
   var LABEL = 'position:fixed;pointer-events:none;background:__ACCENT__;color:__ON_ACCENT__;font:11px/1.5 -apple-system,system-ui,sans-serif;padding:1px 6px;border-radius:3px;z-index:2147483647;display:none;white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis';
@@ -2294,53 +2548,98 @@ var require_guest = __commonJS({
   var frozen = false;
   var frozenEl = null;
   var scrollFrame = 0;
+  var picker;
   function reportScroll() {
+    revision += 1;
+    if (picker) picker.cancel();
+    if (mode === 'region') hide();
     if (frozen && frozenEl && frozenEl.isConnected) show(frozenEl);
     if (scrollFrame) return;
     scrollFrame = requestAnimationFrame(function () {
       scrollFrame = 0;
-      try { console.log(MARK + JSON.stringify({ kind: 'scroll', x: window.scrollX, y: window.scrollY })); } catch (error) {}
+      try { console.log(MARK + JSON.stringify({ kind: 'scroll', x: window.scrollX, y: window.scrollY, revision: revision })); } catch (error) {}
     });
   }
   window.addEventListener('scroll', reportScroll, true);
   window.addEventListener('resize', reportScroll, true);
   layer.addEventListener('mousemove', function (event) {
-    if (frozen) return;
+    if (frozen || mode === 'region' || capturing) return;
     show(hit(event.clientX, event.clientY));
   });
   layer.addEventListener('mousedown', function (event) { event.preventDefault(); event.stopPropagation(); }, true);
   layer.addEventListener('click', function (event) {
     event.preventDefault();
     event.stopPropagation();
+    if (frozen || mode === 'region' || capturing) return;
     var el = hit(event.clientX, event.clientY);
     if (!el) return;
     frozen = true;
     frozenEl = el;
     var info = describe(el);
     info.kind = 'pick';
+    info.viewport = viewport();
     info.scroll = { x: window.scrollX, y: window.scrollY };
     try { console.log(MARK + JSON.stringify(info)); } catch (error) {}
   }, true);
+  picker = installRegionPicker(layer, {
+    enabled: function () { return mode === 'region'; },
+    ignore: function () { return false; },
+    blocked: function () { return frozen || capturing; },
+    bounds: viewport,
+    preview: function (rect) {
+      hide();
+      if (!rect) return;
+      Object.assign(box.style, { display: 'block', left: rect.x + 'px', top: rect.y + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+    },
+    select: function (rect) {
+      frozen = true;
+      emit({ kind: 'region', rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
+    }
+  });
+  function onKey(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (!picker.cancel()) emit({ kind: 'escape' });
+  }
+  function onBlur() { picker.cancel(); }
+  window.addEventListener('keydown', onKey, true);
+  window.addEventListener('blur', onBlur);
   document.documentElement.appendChild(box);
   document.documentElement.appendChild(label);
   document.documentElement.appendChild(layer);
   window.__dshAnnotate = {
-    freeze: function () { frozen = true; },
+    freeze: function () { frozen = true; picker.cancel(); },
+    prepareCapture: async function (expected) {
+      var now = viewport();
+      if (expected && !['width', 'height', 'x', 'y', 'revision', 'instance'].every(function (key) { return now[key] === expected[key]; })) return null;
+      capturing = true; hide();
+      await new Promise(function (resolve) { requestAnimationFrame(function () { requestAnimationFrame(resolve); }); });
+      return window.__dshAnnotate && window.__dshAnnotate.captureValid(now) ? now : null;
+    },
+    captureValid: function (expected) {
+      var now = viewport();
+      return !!expected && ['width', 'height', 'x', 'y', 'revision', 'instance'].every(function (key) { return now[key] === expected[key]; });
+    },
+    finishCapture: function () { capturing = false; if (!frozen) hide(); },
     resume: function () {
       frozen = false;
+      picker.cancel();
       frozenEl = null;
       box.style.display = 'none';
       label.style.display = 'none';
     },
     scroll: reportScroll,
     destroy: function () {
+      picker.destroy();
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', onBlur);
       try { layer.remove(); box.remove(); label.remove(); } catch (error) {}
       window.removeEventListener('scroll', reportScroll, true);
       window.removeEventListener('resize', reportScroll, true);
       window.__dshAnnotate = null;
     }
   };
-  reportScroll();
+  emit({ kind: 'ready', x: scrollX, y: scrollY, revision: revision });
   return true;
 })()`;
     var GUEST_FREEZE2 = `(function () {
@@ -2362,11 +2661,11 @@ var require_guest = __commonJS({
 
 // src/client.cjs
 var React = require("react");
-var { toPng } = require_lib();
+var { captureDom, captureHostRegion, captureGuest } = require_capture();
+var { clipRect, installRegionPicker } = require_region();
 var { describeElement, dataUrlToBytes, formatAnnotations, clip } = require_lib2();
 var { MARK, GUEST_INSTALL, GUEST_REMOVE, GUEST_FREEZE, GUEST_RESUME } = require_guest();
 var NS = "annotateAnything";
-var MAX_SHOT_AREA = 25e5;
 var UI = "[data-annot-ui]";
 var CSS2 = `
 .dsh-annot-trigger{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
@@ -2378,6 +2677,7 @@ var CSS2 = `
 .dsh-annot-bar__count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);font-weight:600}
 .dsh-annot-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-radius:7px;padding:4px 10px;font:12px/1.3 inherit;cursor:pointer;white-space:nowrap}
 .dsh-annot-btn:hover:enabled{background:var(--dsw-alias-bg-layer-2)}
+.dsh-annot-btn[aria-pressed=true]{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 .dsh-annot-btn:disabled{opacity:.5;cursor:default}
 .dsh-annot-btn--primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff)}
 .dsh-annot-btn--primary:hover:enabled{filter:brightness(1.06)}
@@ -2427,20 +2727,8 @@ function boxOf(rect) {
   const y = rect.y !== void 0 ? rect.y : rect.top;
   const width = rect.width;
   const height = rect.height;
-  if (width < 1 || height < 1) return null;
+  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return null;
   return { x, y, width, height };
-}
-async function captureDom(el) {
-  const rect = el.getBoundingClientRect();
-  if (rect.width < 2 || rect.height < 2 || rect.width * rect.height > MAX_SHOT_AREA) return null;
-  const ratio = Math.min(2, Math.max(0.25, 1200 / Math.max(rect.width, rect.height)));
-  return await toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false });
-}
-async function captureGuest(wv, rect) {
-  if (!wv || typeof wv.capturePage !== "function" || !rect) return null;
-  if (rect.width < 2 || rect.height < 2) return null;
-  const image = await wv.capturePage({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
-  return image && typeof image.toDataURL === "function" ? image.toDataURL() : null;
 }
 function Trigger({ props, store, t }) {
   const state = React.useSyncExternalStore(store.subscribe, store.get, store.get);
@@ -2465,7 +2753,8 @@ function Overlay({ ctx, store, t }) {
   const state = React.useSyncExternalStore(store.subscribe, store.get, store.get);
   const [hover, setHover] = React.useState(null);
   const [items, setItems] = React.useState([]);
-  const [draft, setDraft] = React.useState(null);
+  const [draft, setDraftState] = React.useState(null);
+  const [mode, setMode] = React.useState("element");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
   const [, setTick] = React.useState(0);
@@ -2473,6 +2762,14 @@ function Overlay({ ctx, store, t }) {
   const itemsRef = React.useRef(items);
   const scrollRef = React.useRef(/* @__PURE__ */ new Map());
   const guestsRef = React.useRef([]);
+  const epochRef = React.useRef(0);
+  const busyRef = React.useRef(busy);
+  busyRef.current = busy;
+  const regionPickerRef = React.useRef(null);
+  const setDraft = (value) => {
+    draftRef.current = value;
+    setDraftState(value);
+  };
   draftRef.current = draft;
   itemsRef.current = items;
   const isActive = state.active;
@@ -2485,18 +2782,21 @@ function Overlay({ ctx, store, t }) {
     return null;
   };
   const guestScroll = (wv) => scrollRef.current.get(wv) || { x: 0, y: 0 };
-  const guestViewportRect = (wv, docRect) => {
+  const guestViewportRect = (wv, docRect, viewport) => {
     const outer = wv.getBoundingClientRect();
     const scroll = guestScroll(wv);
+    const sx = viewport ? outer.width / viewport.width : 1;
+    const sy = viewport ? outer.height / viewport.height : 1;
     return {
-      x: outer.left + docRect.x - scroll.x,
-      y: outer.top + docRect.y - scroll.y,
-      width: docRect.width,
-      height: docRect.height
+      x: outer.left + (docRect.x - scroll.x) * sx,
+      y: outer.top + (docRect.y - scroll.y) * sy,
+      width: docRect.width * sx,
+      height: docRect.height * sy
     };
   };
   const itemRect = (item) => {
-    if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect);
+    if (item.kind === "region" && item.epoch !== epochRef.current) return null;
+    if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect, item.guestViewport);
     if (item.wv && item.guestRect) {
       const outer = item.wv.getBoundingClientRect();
       return { x: outer.left + item.guestRect.x, y: outer.top + item.guestRect.y, width: item.guestRect.width, height: item.guestRect.height };
@@ -2509,7 +2809,8 @@ function Overlay({ ctx, store, t }) {
   };
   const draftRectOf = (value) => {
     if (!value) return null;
-    if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect);
+    if (value.kind === "region" && value.epoch !== epochRef.current) return null;
+    if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect, value.guestViewport);
     if (value.el && value.el.isConnected) {
       const rect = value.el.getBoundingClientRect();
       return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
@@ -2529,7 +2830,7 @@ function Overlay({ ctx, store, t }) {
   const capture = async (item) => {
     let shot = null;
     try {
-      shot = item.wv ? await captureGuest(item.wv, item.guestRect) : await captureDom(item.el);
+      shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
     } catch (_error) {
       shot = null;
     }
@@ -2539,6 +2840,35 @@ function Overlay({ ctx, store, t }) {
   const openDraft = (payload) => {
     setError("");
     setDraft(payload);
+  };
+  const openRegion = (rect, wv, viewport) => {
+    if (draftRef.current || busyRef.current) return;
+    const current = {
+      id: "a" + Math.random().toString(36).slice(2),
+      kind: "region",
+      epoch: epochRef.current,
+      desc: { label: t("region.label"), rect, surface: wv ? "browser" : "harness" },
+      rect: wv ? null : rect,
+      wv: wv || null,
+      guestRect: wv ? rect : null,
+      guestViewport: viewport,
+      comment: "",
+      shot: null,
+      capturePending: true,
+      docRect: wv ? { ...rect, x: rect.x + viewport.x, y: rect.y + viewport.y } : null
+    };
+    openDraft(current);
+    setHover(null);
+    const pending = wv ? captureGuest(wv, rect, viewport) : captureHostRegion(rect);
+    pending.then((shot) => {
+      if (draftRef.current?.id !== current.id || !store.get().active) return;
+      if (current.epoch !== epochRef.current || !shot) throw new Error("Selection moved");
+      setDraft({ ...draftRef.current, shot, capturePending: false });
+    }).catch(() => {
+      if (draftRef.current?.id !== current.id) return;
+      setDraft(null);
+      setError(t("error.captureFailed"));
+    });
   };
   const openGuestPick = (wv, payload) => {
     if (draftRef.current) return;
@@ -2556,6 +2886,7 @@ function Overlay({ ctx, store, t }) {
       el: null,
       wv,
       guestRect: payload.rect,
+      guestViewport: payload.viewport,
       docRect,
       rect: null,
       comment: "",
@@ -2565,24 +2896,14 @@ function Overlay({ ctx, store, t }) {
   };
   const saveDraft = () => {
     const current = draftRef.current;
-    if (!current) return;
+    if (!current || current.capturePending || current.kind === "region" && !current.shot) return;
     const exists = itemsRef.current.some((entry) => entry.id === current.id);
     if (exists) {
       setItems((prev) => prev.map((entry) => entry.id === current.id ? Object.assign({}, entry, { comment: current.comment }) : entry));
     } else {
-      const item = {
-        id: current.id,
-        desc: current.desc,
-        el: current.el,
-        wv: current.wv,
-        guestRect: current.guestRect,
-        docRect: current.docRect,
-        rect: current.rect,
-        comment: current.comment,
-        shot: current.shot || null
-      };
+      const item = { ...current, editing: false };
       setItems(itemsRef.current.concat([item]));
-      capture(item).catch(() => {
+      if (!item.shot) capture(item).catch(() => {
       });
     }
     setDraft(null);
@@ -2599,7 +2920,7 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     if (!isActive) return void 0;
     const onMove = (event) => {
-      if (draftRef.current) return;
+      if (mode === "region" || draftRef.current || busyRef.current) return;
       if (event.target instanceof Element && event.target.closest(UI)) return;
       const el = pickAt(event.clientX, event.clientY);
       if (!el) {
@@ -2621,7 +2942,7 @@ function Overlay({ ctx, store, t }) {
       if (event.target instanceof Element && event.target.closest(UI)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (draftRef.current) return;
+      if (mode === "region" || draftRef.current || busyRef.current) return;
       const el = pickAt(event.clientX, event.clientY);
       if (!el) return;
       if (String(el.tagName).toLowerCase() === "webview") {
@@ -2642,10 +2963,44 @@ function Overlay({ ctx, store, t }) {
     };
     const onKey = (event) => {
       if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (regionPickerRef.current?.cancel()) return;
       if (draftRef.current) setDraft(null);
       else store.set({ active: false });
     };
-    const onScroll = () => setTick((value) => value + 1);
+    const invalidate = () => {
+      epochRef.current += 1;
+      regionPickerRef.current?.cancel();
+      if (draftRef.current?.capturePending) setDraft(null);
+      setHover(null);
+      setTick((value) => value + 1);
+    };
+    const onScroll = (event) => {
+      if (event.target instanceof Element && event.target.closest(UI)) return;
+      invalidate();
+    };
+    const picker = installRegionPicker(document, {
+      enabled: () => mode === "region",
+      ignore: (event) => event.target instanceof Element && !!event.target.closest(UI),
+      blocked: () => !!draftRef.current || busyRef.current,
+      bounds: () => ({ width: innerWidth, height: innerHeight }),
+      preview: setHover,
+      select: (rect) => {
+        const overlapsGuest = Array.from(document.querySelectorAll("webview")).some((wv) => {
+          const b = wv.getBoundingClientRect();
+          return rect.x < b.right && rect.x + rect.width > b.left && rect.y < b.bottom && rect.y + rect.height > b.top;
+        });
+        if (overlapsGuest) {
+          setError(t("error.guestHint"));
+          return;
+        }
+        openRegion(rect);
+      }
+    });
+    regionPickerRef.current = picker;
+    const onBlur = () => picker.cancel();
+    window.addEventListener("blur", onBlur);
     document.addEventListener("mousemove", onMove, true);
     document.addEventListener("mousedown", stop, true);
     document.addEventListener("pointerdown", stop, true);
@@ -2659,7 +3014,7 @@ function Overlay({ ctx, store, t }) {
         const rect = wv.getBoundingClientRect();
         if (rect.width < 4 || rect.height < 4) continue;
         try {
-          const pending = wv.executeJavaScript(guestInstallScript());
+          const pending = wv.executeJavaScript(guestInstallScript(mode));
           if (pending && typeof pending.catch === "function") pending.catch(() => {
           });
         } catch (_error) {
@@ -2669,24 +3024,43 @@ function Overlay({ ctx, store, t }) {
           if (!message) return;
           try {
             const payload = JSON.parse(message.slice(MARK.length));
-            if (payload && payload.kind === "scroll") {
+            if (payload?.kind === "escape") {
+              onKey({ key: "Escape", preventDefault() {
+              }, stopImmediatePropagation() {
+              } });
+              return;
+            }
+            if (payload && ["scroll", "ready"].includes(payload.kind)) {
+              if (payload.kind === "scroll") invalidate();
               scrollRef.current.set(wv, { x: Number(payload.x) || 0, y: Number(payload.y) || 0 });
               setTick((value) => value + 1);
               return;
             }
-            if (!payload || payload.kind !== "pick" || !payload.rect) return;
+            if (!payload || !["pick", "region"].includes(payload.kind)) return;
+            const viewport = payload.viewport;
+            if (!viewport || typeof viewport.instance !== "string" || !["width", "height", "x", "y", "revision"].every((key) => Number.isFinite(viewport[key]))) return;
+            const rect2 = clipRect(payload.rect, viewport.width, viewport.height, payload.kind === "region" ? 4 : 2);
+            if (!rect2) return;
+            scrollRef.current.set(wv, { x: viewport.x, y: viewport.y });
+            if (payload.kind === "region") {
+              if (mode === "region") openRegion(rect2, wv, viewport);
+              return;
+            }
+            if (mode !== "element") return;
             openGuestPick(wv, {
               tag: clip(payload.tag, 40),
               label: clip(payload.label, 90),
               text: clip(payload.text, 200),
               selector: clip(payload.selector, 300),
-              rect: payload.rect,
-              scroll: payload.scroll
+              rect: rect2,
+              scroll: { x: viewport.x, y: viewport.y },
+              viewport
             });
           } catch (_error) {
           }
         };
         wv.addEventListener("console-message", onMessage);
+        wv.addEventListener("did-start-navigation", invalidate);
         guests.push([wv, onMessage]);
       }
       guestsRef.current = guests;
@@ -2695,6 +3069,7 @@ function Overlay({ ctx, store, t }) {
       for (const pair of guests) {
         try {
           pair[0].removeEventListener("console-message", pair[1]);
+          pair[0].removeEventListener("did-start-navigation", invalidate);
           const pending = pair[0].executeJavaScript(GUEST_REMOVE);
           if (pending && typeof pending.catch === "function") pending.catch(() => {
           });
@@ -2706,6 +3081,9 @@ function Overlay({ ctx, store, t }) {
     };
     install();
     return () => {
+      picker.destroy();
+      regionPickerRef.current = null;
+      window.removeEventListener("blur", onBlur);
       document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("mousedown", stop, true);
       document.removeEventListener("pointerdown", stop, true);
@@ -2715,7 +3093,14 @@ function Overlay({ ctx, store, t }) {
       window.removeEventListener("resize", onScroll, true);
       uninstall();
     };
-  }, [isActive, store, t]);
+  }, [isActive, mode, store, t]);
+  React.useEffect(() => {
+    if (!isActive) {
+      setDraft(null);
+      setItems([]);
+      setHover(null);
+    }
+  }, [isActive]);
   React.useEffect(() => {
     if (!isActive) return;
     signalGuests(draft ? GUEST_FREEZE : GUEST_RESUME);
@@ -2734,9 +3119,9 @@ function Overlay({ ctx, store, t }) {
       for (let index = 0; index < itemsRef.current.length; index += 1) {
         const item = itemsRef.current[index];
         let shot = item.shot;
-        if (!shot) {
+        if (!shot && item.kind !== "region") {
           try {
-            shot = item.wv ? await captureGuest(item.wv, item.guestRect) : await captureDom(item.el);
+            shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
           } catch (_error) {
             shot = null;
           }
@@ -2771,9 +3156,30 @@ function Overlay({ ctx, store, t }) {
     React.createElement(
       "div",
       { key: "bar", "data-annot-ui": "bar", className: "dsh-annot-bar" },
-      React.createElement("span", { className: "dsh-annot-bar__hint" }, t(draft ? "bar.hintDraft" : "bar.hint")),
+      React.createElement("span", { className: "dsh-annot-bar__hint" }, t(draft ? draft.capturePending ? "bar.capturing" : "bar.hintDraft" : mode === "region" ? "bar.regionHint" : "bar.hint")),
+      ...["element", "region"].map((value) => React.createElement("button", {
+        key: value,
+        type: "button",
+        className: "dsh-annot-btn",
+        "aria-pressed": mode === value,
+        disabled: !!draft || busy,
+        onClick: () => {
+          setHover(null);
+          setMode(value);
+        }
+      }, t("mode." + value))),
       React.createElement("span", { className: "dsh-annot-bar__count" }, String(items.length)),
-      React.createElement("button", { key: "send", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: items.length === 0 || busy, onClick: send }, busy ? t("bar.sending") : t("bar.send", { count: items.length })),
+      ...items.flatMap((item, index) => item.kind === "region" && item.epoch !== epochRef.current ? [
+        React.createElement("button", {
+          key: item.id,
+          className: "dsh-annot-btn",
+          disabled: busy || !!draft,
+          title: item.comment || t("pin.empty"),
+          "aria-label": t("pin.edit", { index: index + 1 }),
+          onClick: () => openDraft({ ...item, editing: true })
+        }, String(index + 1))
+      ] : []),
+      React.createElement("button", { key: "send", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: items.length === 0 || busy || !!draft, onClick: send }, busy ? t("bar.sending") : t("bar.send", { count: items.length })),
       React.createElement("button", { key: "close", className: "dsh-annot-btn", onClick: () => {
         setItems([]);
         setDraft(null);
@@ -2823,6 +3229,7 @@ function Overlay({ ctx, store, t }) {
           className: "dsh-annot-pin",
           style: { left: Math.max(0, rect.x - 11), top: Math.max(0, rect.y - 11) },
           title: item.comment || t("pin.empty"),
+          disabled: busy,
           onClick: () => openDraft(Object.assign({}, item, { editing: true }))
         },
         String(index + 1)
@@ -2848,13 +3255,13 @@ function Overlay({ ctx, store, t }) {
           value: draft.comment,
           onChange: (event) => setDraft(Object.assign({}, draftRef.current, { comment: event.target.value }))
         }),
-        React.createElement("div", { className: "dsh-annot-card__where" }, draft.desc && draft.desc.selector || ""),
+        React.createElement("div", { className: "dsh-annot-card__where" }, draft.kind === "region" ? t("prompt.region", { surface: draft.desc.surface, ...draft.desc.rect }) : draft.desc && draft.desc.selector || ""),
         React.createElement(
           "div",
           { className: "dsh-annot-card__rows" },
           React.createElement("button", { key: "cancel", className: "dsh-annot-btn", onClick: () => setDraft(null) }, t("card.cancel")),
           draft.editing ? React.createElement("button", { key: "delete", className: "dsh-annot-btn dsh-annot-btn--danger", onClick: () => removeItem(draft.id) }, t("card.delete")) : null,
-          React.createElement("button", { key: "save", className: "dsh-annot-btn dsh-annot-btn--primary", onClick: saveDraft }, t("card.save"))
+          React.createElement("button", { key: "save", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: !!draft.capturePending, onClick: saveDraft }, t("card.save"))
         )
       )
     );
@@ -2862,12 +3269,12 @@ function Overlay({ ctx, store, t }) {
   if (error) children.push(React.createElement("div", { key: "error", "data-annot-ui": "error", className: "dsh-annot-error" }, error));
   return React.createElement("div", { "data-annot-ui": "layer", className: "dsh-annot-layer" }, children);
 }
-function guestInstallScript() {
+function guestInstallScript(mode) {
   const root = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (root.getPropertyValue(name) || "").trim() || fallback;
   const accent = read("--dsw-alias-button-primary-fill", read("--dsw-alias-brand-primary", "#3b82f6"));
   const onAccent = read("--dsw-alias-label-primary-foreground", "#fff");
-  return GUEST_INSTALL.split("__ACCENT__").join(accent).split("__ON_ACCENT__").join(onAccent);
+  return GUEST_INSTALL.replace("__MODE__", mode || "element").split("__ACCENT__").join(accent).split("__ON_ACCENT__").join(onAccent);
 }
 function apply(ctx) {
   ctx.effect(() => {
@@ -2906,6 +3313,12 @@ function apply(ctx) {
 var DICT_EN = {
   "trigger.title": "Annotate",
   "bar.hint": "Click an element to annotate it",
+  "mode.element": "Element",
+  "mode.region": "Region",
+  "region.label": "Selected region",
+  "bar.regionHint": "Drag to select a visible region",
+  "bar.capturing": "Capturing\u2026",
+  "prompt.region": "   {surface} region (CSS px): x={x}, y={y}, width={width}, height={height}",
   "bar.hintDraft": "Describe the annotation",
   "bar.send": "Send {count}",
   "bar.sending": "Sending\u2026",
@@ -2915,6 +3328,7 @@ var DICT_EN = {
   "card.cancel": "Cancel",
   "card.delete": "Delete",
   "pin.empty": "No comment",
+  "pin.edit": "Edit annotation {index}",
   "error.noSession": "Open a chat before sending annotations",
   "error.sendFailed": "The annotations were not sent",
   "error.unsupportedApi": "This Harness version does not support sending image drafts. Update Harness before sending.",
@@ -2929,6 +3343,12 @@ var DICT_EN = {
 var DICT_RU = {
   "trigger.title": "\u0410\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
   "bar.hint": "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u044D\u043B\u0435\u043C\u0435\u043D\u0442, \u0447\u0442\u043E\u0431\u044B \u0430\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0435\u0433\u043E",
+  "mode.element": "\u042D\u043B\u0435\u043C\u0435\u043D\u0442",
+  "mode.region": "\u041E\u0431\u043B\u0430\u0441\u0442\u044C",
+  "region.label": "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u0430\u044F \u043E\u0431\u043B\u0430\u0441\u0442\u044C",
+  "bar.regionHint": "\u0417\u0430\u0436\u043C\u0438\u0442\u0435 \u043A\u043D\u043E\u043F\u043A\u0443 \u0438 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C",
+  "bar.capturing": "\u0421\u043D\u0438\u043C\u043E\u043A\u2026",
+  "prompt.region": "   \u041E\u0431\u043B\u0430\u0441\u0442\u044C {surface} (CSS px): x={x}, y={y}, \u0448\u0438\u0440\u0438\u043D\u0430={width}, \u0432\u044B\u0441\u043E\u0442\u0430={height}",
   "bar.hintDraft": "\u041E\u043F\u0438\u0448\u0438\u0442\u0435, \u0447\u0442\u043E \u0437\u0434\u0435\u0441\u044C \u043D\u0435 \u0442\u0430\u043A",
   "bar.send": "\u041E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C ({count})",
   "bar.sending": "\u041E\u0442\u043F\u0440\u0430\u0432\u043A\u0430\u2026",
@@ -2938,6 +3358,7 @@ var DICT_RU = {
   "card.cancel": "\u041E\u0442\u043C\u0435\u043D\u0430",
   "card.delete": "\u0423\u0434\u0430\u043B\u0438\u0442\u044C",
   "pin.empty": "\u0411\u0435\u0437 \u043A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u044F",
+  "pin.edit": "\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0430\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u044E {index}",
   "error.noSession": "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0447\u0430\u0442, \u0447\u0442\u043E\u0431\u044B \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u0430\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u0438",
   "error.sendFailed": "\u0410\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u0438 \u043D\u0435 \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u043B\u0438\u0441\u044C",
   "error.unsupportedApi": "\u042D\u0442\u0430 \u0432\u0435\u0440\u0441\u0438\u044F Harness \u043D\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442 \u043E\u0442\u043F\u0440\u0430\u0432\u043A\u0443 \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0439 \u0447\u0435\u0440\u0435\u0437 drafts. \u041E\u0431\u043D\u043E\u0432\u0438\u0442\u0435 Harness.",

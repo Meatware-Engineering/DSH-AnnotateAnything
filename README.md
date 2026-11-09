@@ -7,9 +7,12 @@ English and Russian UI are included. Licensed under MIT.
 ## What it does
 
 - Adds an **Annotate** button beside the conversation input.
-- Highlights elements under the pointer in the Harness UI.
+- Keeps the original **Element** mode and adds **Region**: hold the primary
+  pointer button, drag a rectangle in any direction, and release.
+- Captures only the selected visible rectangle, with no annotation controls in the PNG.
 - Lets you add several comments, then edit or delete them via numbered pins.
-- Sends a numbered comment list, CSS selectors, and one cropped PNG per selection.
+- Sends a numbered comment list and one cropped PNG per selection. Elements
+  include CSS selectors; arbitrary regions include viewport coordinates in CSS pixels.
 - Supports selecting page elements inside the Desktop Browser panel when its
   Electron `webview` exposes `executeJavaScript` and `capturePage`.
 
@@ -59,15 +62,22 @@ Do not install both a linked copy and a GitHub copy under competing package name
 ## Use
 
 1. Open the conversation you want to send screenshots to.
-2. Click **Annotate**, then click a visible interface element.
-3. Enter a comment and click **Add**. Repeat for other elements.
+2. Click **Annotate**. Choose **Element** and click an element, or choose **Region**
+   and drag a visible rectangle. In Desktop Browser, start the drag inside the page.
+3. Wait for the region screenshot, enter a comment and click **Add**. Repeat for
+   other elements or regions; both modes can be mixed in the same submission.
 4. Click a numbered pin to edit/delete its comment.
 5. Click **Send** to submit the annotations to the current conversation.
 
-**Esc** dismisses the current editor, or leaves annotation mode if no editor is
-open. **Close** clears pending annotations. Finish or discard annotations before
+**Esc** cancels a drag first, then dismisses the current editor, or leaves
+annotation mode if neither is open. Selections smaller than 4 CSS pixels in either
+direction are ignored. Pointer cancellation, loss of capture, window blur, scroll
+or resize cancels an unfinished drag. **Close** clears pending annotations.
+Finish or discard annotations before
 switching conversations. Opening annotation mode again after a guest navigation
-reinstalls its page selection overlay.
+reinstalls its page selection overlay. Saved region images do not change after
+scrolling: their stale outlines disappear, and numbered buttons in the toolbar
+keep their comments available for editing or deletion.
 
 ## Requirements and limitations
 
@@ -82,11 +92,16 @@ reinstalls its page selection overlay.
 - Host screenshots are DOM reconstructions, not OS screenshots. Video, protected
   content, cross-origin resources, canvas and unusual CSS may not reproduce.
   Fonts are not embedded. Selected host regions above 2.5 million CSS pixels are
-  rejected; choose a smaller visible element.
-- Screenshots are captured when an annotation is added, with a retry on Send if
-  the first capture failed. Keep the selected content visible until it is captured.
-  Navigation, scrolling during a failed capture, and moving elements can invalidate
-  a selection. Remove and reselect it if needed.
+  rejected; choose a smaller visible selection. Region PNGs are bounded to 1600
+  pixels on their longest edge. A region cannot span both Harness and a guest page;
+  select inside one surface at a time.
+- **Regions** are captured immediately after release, before the comment is saved.
+  A failed or invalidated region capture must be selected again; Send never silently
+  recaptures different page content. Scroll, resize or navigation during capture
+  cancels it. Dynamic content can still change while a screenshot is being rendered.
+- **Elements** retain capture on Add and retry on Send. Keep their content visible
+  until capture finishes. Guest captures reject a changed viewport or page instance;
+  remove and reselect an invalidated element.
 - Guest selections operate in the main document, not nested cross-origin frames.
   Newly opened guest tabs require leaving and re-entering annotation mode.
 - If any screenshot fails, sending stops and the annotations stay available.
@@ -99,7 +114,9 @@ There is no independent analytics backend. Pressing **Send** submits selected
 screenshots, comments and element labels/selectors through Harness to the chosen
 conversation and its configured model provider. They may contain private page
 content. Inspect selections and avoid passwords, tokens and other secrets.
-DOM screenshot rendering may request the images/styles used by the selected page.
+Host region capture reconstructs the document locally before cropping; only the
+selected crop is submitted. DOM rendering may request images/styles from the page,
+including resources outside the selected rectangle.
 Guest-page metadata is untrusted page content, not instructions to the assistant.
 
 ## Development and verification
@@ -113,8 +130,36 @@ npm run check
 npm pack --dry-run
 ```
 
-The automated tests cover pure helpers, guest script parsing and package entry
-points. They are not a real Harness UI test. Before a release, verify in Harness:
+The automated tests cover geometry validation, reversed/clipped drags, pointer
+cancellation, raster coordinate conversion, mixed prompt formatting, guest script
+parsing and package entry points. They are not a real Harness UI test.
+
+Optional Chromium integration checks exercise the actual React overlay, host DOM
+crops (including scrolling and fixed content), guest scripts, scaled guest geometry,
+and ordered PNG attachments through a mocked conversation service. Install test
+tools outside this checkout, then run:
+
+```sh
+npm install --prefix /tmp/annotate-test-tools playwright react react-dom
+/tmp/annotate-test-tools/node_modules/.bin/playwright install chromium
+NODE_PATH=/tmp/annotate-test-tools/node_modules node test/browser.cjs
+```
+
+`CHROMIUM_EXECUTABLE` can select an already installed Chromium. PNG evidence is
+written to a fresh OS temporary directory. The Chromium guest bridge simulates
+Electron APIs; it does not certify every Desktop version.
+
+The optional native test runs a separate Electron app with its own temporary
+profile and a local test page. It checks actual `webview.executeJavaScript` and
+`capturePage` at 100%, 150% and 200% zoom, including PNG edge pixels:
+
+```sh
+npm install --prefix /tmp/annotate-test-tools electron@44.7.0
+NODE_PATH=/tmp/annotate-test-tools/node_modules node test/electron.cjs
+```
+
+It briefly opens a test window and closes it afterward. The user's Harness sessions
+are not connected to this test. Before a release, verify in Harness:
 selection, Add/edit/delete, multiple screenshots, Send, failed capture, Esc/Close,
 reopening the overlay, guest navigation, and switching conversations. Do not use
 real secrets in screenshots or send to an unrelated conversation during testing.
@@ -124,6 +169,8 @@ real secrets in screenshots or send to an unrelated conversation during testing.
 - `src/client.cjs`: UI, capture and conversation integration.
 - `src/guest.cjs`: Browser-panel guest selection scripts.
 - `src/lib.cjs`: formatting/selector/data-URL helpers.
+- `src/region.cjs`: shared pointer selection and validated geometry.
+- `src/capture.cjs`: host snapshots and raster cropping for both surfaces.
 - `client.js`: committed build output.
 - `index.js`: empty Host plugin.
 - `cordis.patch.yml`: bundle registration.

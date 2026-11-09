@@ -1,0 +1,80 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { clipRect, dragRect, pixelRect, installRegionPicker } = require('../src/region.cjs');
+const { formatAnnotations } = require('../src/lib.cjs');
+
+test('region normalization handles all drag directions and viewport clipping', () => {
+  for (const [a, b] of [[{ x: 10, y: 20 }, { x: 80, y: 90 }], [{ x: 80, y: 90 }, { x: 10, y: 20 }],
+    [{ x: 80, y: 20 }, { x: 10, y: 90 }], [{ x: 10, y: 90 }, { x: 80, y: 20 }]]) {
+    assert.deepEqual(dragRect(a, b, 100, 100), { x: 10, y: 20, width: 70, height: 70 });
+  }
+  assert.deepEqual(dragRect({ x: 20, y: 20 }, { x: 150, y: -10 }, 100, 100), { x: 20, y: 0, width: 80, height: 20 });
+});
+
+test('invalid, empty and tiny rectangles never produce an annotation', () => {
+  for (const value of [NaN, Infinity, -Infinity, '5', undefined]) {
+    assert.equal(clipRect({ x: value, y: 0, width: 10, height: 10 }, 100, 100), null);
+  }
+  for (const size of [0, -1, NaN, Infinity]) {
+    assert.equal(clipRect({ x: 0, y: 0, width: size, height: 10 }, 100, 100), null);
+  }
+  assert.equal(dragRect({ x: 1, y: 1 }, { x: 3, y: 40 }, 100, 100), null);
+  assert.equal(clipRect({ x: 120, y: 0, width: 10, height: 10 }, 100, 100), null);
+});
+
+test('raster crop uses independent image-to-viewport ratios, including fractional DPR', () => {
+  assert.deepEqual(pixelRect({ x: 10, y: 20, width: 30, height: 40 }, { width: 100, height: 100 },
+    { width: 200, height: 150 }), { x: 20, y: 30, width: 60, height: 60 });
+  assert.deepEqual(pixelRect({ x: 0.5, y: 0.5, width: 10, height: 10 }, { width: 100, height: 100 },
+    { width: 125, height: 125 }), { x: 0, y: 0, width: 14, height: 14 });
+});
+
+function pickerHarness() {
+  const handlers = {}, selected = [], previews = [];
+  const target = { addEventListener: (n, f) => { handlers[n] = f; }, removeEventListener: (n) => { delete handlers[n]; } };
+  const picker = installRegionPicker(target, { enabled: () => true, blocked: () => false, ignore: (e) => e.ui,
+    bounds: () => ({ width: 100, height: 100 }), preview: (r) => previews.push(r), select: (r) => selected.push(r) });
+  function fire(name, values = {}) {
+    const e = { target: { setPointerCapture() {}, releasePointerCapture() {} }, button: 0, buttons: 1, pointerId: 1,
+      clientX: 10, clientY: 10, preventDefault() { this.prevented = true; }, stopImmediatePropagation() {}, ...values };
+    handlers[name]?.(e);
+    return e;
+  }
+  return { handlers, selected, previews, picker, fire };
+}
+
+test('pointer picker captures reverse outside release and allows repeated selections', () => {
+  const h = pickerHarness();
+  for (let i = 0; i < 2; i++) {
+    assert.ok(h.fire('pointerdown', { clientX: 80, clientY: 90 }).prevented);
+    h.fire('pointermove', { clientX: -20, clientY: -30 });
+    h.fire('pointerup', { clientX: -20, clientY: -30 });
+  }
+  assert.deepEqual(h.selected, Array(2).fill({ x: 0, y: 0, width: 80, height: 90 }));
+});
+
+test('cancel, lost capture, pointercancel, no held button and UI controls abort safely', () => {
+  for (const reason of ['cancel', 'lostpointercapture', 'pointercancel', 'pointermove']) {
+    const h = pickerHarness(); h.fire('pointerdown');
+    if (reason === 'cancel') assert.equal(h.picker.cancel(), true);
+    else h.fire(reason, { buttons: 0 });
+    h.fire('pointerup', { clientX: 90, clientY: 90 });
+    assert.equal(h.selected.length, 0);
+    h.picker.destroy(); assert.deepEqual(Object.keys(h.handlers), []);
+  }
+  const h = pickerHarness();
+  assert.equal(h.fire('pointerdown', { ui: true }).prevented, undefined);
+  h.fire('pointerup', { clientX: 90, clientY: 90 });
+  assert.equal(h.selected.length, 0);
+});
+
+test('mixed annotations retain order and region geometry without inventing a selector', () => {
+  const calls = [];
+  const t = (key, params) => { calls.push([key, params]); return key; };
+  formatAnnotations([{ desc: { label: 'button', selector: '#send' } },
+    { kind: 'region', desc: { label: 'region', surface: 'browser', rect: { x: 1, y: 2, width: 30, height: 40 } }, comment: 'fix' }], t);
+  assert.deepEqual(calls.map(([key]) => key), ['prompt.head', 'prompt.item', 'prompt.where', 'prompt.item', 'prompt.region']);
+  assert.equal(calls[3][1].index, 2);
+  assert.deepEqual(calls[4][1], { surface: 'browser', x: 1, y: 2, width: 30, height: 40 });
+});
