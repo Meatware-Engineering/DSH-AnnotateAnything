@@ -94,7 +94,8 @@ keep their comments available for editing or deletion.
   use those APIs; cross-origin iframe contents are not generally accessible.
 - Host screenshots are DOM reconstructions, not OS screenshots. Video, protected
   content, cross-origin resources, canvas and unusual CSS may not reproduce.
-  Fonts are not embedded. Selected host regions above 2.5 million CSS pixels are
+  Protected or cross-origin canvas/video inside a selection cannot be read by
+  DOM capture and produces a specific error. Fonts are not embedded. Selected host regions above 2.5 million CSS pixels are
   rejected; choose a smaller visible selection. Region PNGs are bounded to 1600
   pixels on their longest edge. A region cannot span both Harness and a guest page;
   select inside one surface at a time.
@@ -108,6 +109,9 @@ keep their comments available for editing or deletion.
 - Guest selections operate in the main document, not nested cross-origin frames.
   Newly opened guest tabs require leaving and re-entering annotation mode.
 - If any screenshot fails, sending stops and the annotations stay available.
+  Errors distinguish size limits, protected pixels, unavailable assets, image
+  decoding, a changed viewport and unavailable guest APIs. A failed region draft
+  retains its comment; Cancel allows a fresh selection.
 - This is an early 0.1.0 plugin. No broad Harness version/OS compatibility matrix
   or end-to-end Desktop certification is claimed.
 
@@ -117,9 +121,10 @@ There is no independent analytics backend. Pressing **Send** submits selected
 screenshots, comments and element labels/selectors through Harness to the chosen
 conversation and its configured model provider. They may contain private page
 content. Inspect selections and avoid passwords, tokens and other secrets.
-Host region capture reconstructs the document locally before cropping; only the
-selected crop is submitted. DOM rendering may request images/styles from the page,
-including resources outside the selected rectangle.
+Host region capture reconstructs intersecting content and ancestor layout locally;
+unrelated subtrees become invisible layout placeholders, without reading their
+canvas pixels or embedding their images. Only the selected crop is submitted.
+DOM rendering may request images/styles needed by the selection and its ancestors.
 Guest-page metadata is untrusted page content, not instructions to the assistant.
 
 ## Development and verification
@@ -137,7 +142,8 @@ The automated tests cover geometry validation, reversed/clipped drags, pointer
 cancellation, raster coordinate conversion, mixed prompt formatting, guest script
 parsing and package entry points. They are not a real Harness UI test.
 
-Optional Chromium integration checks exercise the actual React overlay, host DOM
+Optional Chromium integration checks load the committed `client.js` through the
+Harness module-loader contract, then exercise its actual React overlay, host DOM
 crops (including scrolling and fixed content), guest scripts, scaled guest geometry,
 and ordered PNG attachments through a mocked conversation service. Install test
 tools outside this checkout, then run:
@@ -153,7 +159,7 @@ written to a fresh OS temporary directory. The Chromium guest bridge simulates
 Electron APIs; it does not certify every Desktop version.
 
 The optional native test runs a separate Electron app with its own temporary
-profile and a local test page. It checks actual `webview.executeJavaScript` and
+profile and a local test page. It loads the same committed client and checks actual `webview.executeJavaScript` and
 `capturePage` at 100%, 150% and 200% zoom, including PNG edge pixels:
 
 ```sh
@@ -162,7 +168,23 @@ NODE_PATH=/tmp/annotate-test-tools/node_modules node test/electron.cjs
 ```
 
 It briefly opens a test window and closes it afterward. The user's Harness sessions
-are not connected to this test. Before a release, verify in Harness:
+are not connected to this test.
+
+To check the real Harness runtime, create a disposable Web profile and start it
+in another terminal. Do not point this check at your working profile:
+
+```sh
+DSH_HOME=/tmp/annotate-runtime-check dsh plugin --profile web add "link:$(pwd)"
+DSH_HOME=/tmp/annotate-runtime-check dsh web --host 127.0.0.1 --port 0 --no-open
+```
+
+Set `HARNESS_TEST_URL` to the localhost URL printed by that disposable server,
+then run `NODE_PATH=/tmp/annotate-test-tools/node_modules node test/runtime.cjs`.
+The test proves a tainted canvas outside the selected area cannot break its PNG,
+and protected content inside the area reports the right error while preserving
+the comment. It never submits to a model. Stop the disposable server afterward.
+
+Before a release, verify in Harness:
 selection, Add/edit/delete, multiple screenshots, Send, failed capture, Esc/Close,
 reopening the overlay, guest navigation, and switching conversations. Do not use
 real secrets in screenshots or send to an unrelated conversation during testing.

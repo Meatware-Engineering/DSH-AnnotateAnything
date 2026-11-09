@@ -1,7 +1,7 @@
 'use strict';
 
 const React = require('react');
-const { captureDom, captureHostRegion, captureGuest } = require('./capture.cjs');
+const { CaptureError, captureErrorKey, captureDom, captureHostRegion, captureGuest } = require('./capture.cjs');
 const { clipRect, installRegionPicker } = require('./region.cjs');
 const { describeElement, dataUrlToBytes, formatAnnotations, clip } = require('./lib.cjs');
 const { MARK, GUEST_INSTALL, GUEST_REMOVE, GUEST_FREEZE, GUEST_RESUME } = require('./guest.cjs');
@@ -183,8 +183,8 @@ function Overlay({ ctx, store, t }) {
     let shot = null;
     try {
       shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
-    } catch (_error) {
-      shot = null;
+    } catch (failure) {
+      setError(t(captureErrorKey(failure)));
     }
     if (!shot) return;
     setItems((prev) => prev.map((entry) => (entry.id === item.id ? Object.assign({}, entry, { shot: shot }) : entry)));
@@ -209,12 +209,12 @@ function Overlay({ ctx, store, t }) {
     const pending = wv ? captureGuest(wv, rect, viewport) : captureHostRegion(rect);
     pending.then((shot) => {
       if (draftRef.current?.id !== current.id || !store.get().active) return;
-      if (current.epoch !== epochRef.current || !shot) throw new Error('Selection moved');
+      if (current.epoch !== epochRef.current || !shot) throw new CaptureError('changed');
       setDraft({ ...draftRef.current, shot, capturePending: false });
-    }).catch(() => {
+    }).catch((failure) => {
       if (draftRef.current?.id !== current.id) return;
-      setDraft(null);
-      setError(t('error.captureFailed'));
+      setDraft({ ...draftRef.current, capturePending: false });
+      setError(t(captureErrorKey(failure)));
     });
   };
 
@@ -462,17 +462,20 @@ function Overlay({ ctx, store, t }) {
       for (let index = 0; index < itemsRef.current.length; index += 1) {
         const item = itemsRef.current[index];
         let shot = item.shot;
+        let captureFailure;
         if (!shot && item.kind !== 'region') {
           try {
             shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
-          } catch (_error) {
+          } catch (failure) {
+            captureFailure = failure;
             shot = null;
           }
         }
-        resolved.push(Object.assign({}, item, { shot: shot }));
+        resolved.push(Object.assign({}, item, { shot: shot, captureFailure }));
       }
 
-      if (resolved.some((item) => !item.shot)) throw new Error(t('error.captureFailed'));
+      const failed = resolved.find((item) => !item.shot);
+      if (failed) { setError(t(captureErrorKey(failed.captureFailure))); return; }
 
       const files = [];
       resolved.forEach((item, index) => {
@@ -595,7 +598,7 @@ function Overlay({ ctx, store, t }) {
           draft.editing
             ? React.createElement('button', { key: 'delete', className: 'dsh-annot-btn dsh-annot-btn--danger', onClick: () => removeItem(draft.id) }, t('card.delete'))
             : null,
-          React.createElement('button', { key: 'save', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: !!draft.capturePending, onClick: saveDraft }, t('card.save')),
+          React.createElement('button', { key: 'save', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: !!draft.capturePending || (draft.kind === 'region' && !draft.shot), onClick: saveDraft }, t('card.save')),
         ),
       ),
     );
@@ -669,7 +672,15 @@ const DICT_EN = {
   'error.noSession': 'Open a chat before sending annotations',
   'error.sendFailed': 'The annotations were not sent',
   'error.unsupportedApi': 'This Harness version does not support sending image drafts. Update Harness before sending.',
-  'error.captureFailed': 'A screenshot could not be captured. Remove that annotation and select a smaller visible region.',
+  'error.captureFailed': 'The screenshot could not be rendered. Select the content again.',
+  'error.captureInvalid': 'The selection is outside the visible page or is too small. Select it again.',
+  'error.captureTooLarge': 'The selection exceeds 2.5 million CSS pixels. Select a smaller area.',
+  'error.captureAssets': 'An image or style in this selection could not be rendered. Check that the page resources have loaded.',
+  'error.captureProtected': 'This selection contains protected or cross-origin canvas/video pixels that DOM capture cannot read.',
+  'error.captureDecode': 'The browser could not decode the screenshot. Some page content may be unsupported.',
+  'error.captureChanged': 'The page moved, resized or navigated during capture. Select the area again.',
+  'error.captureGuestUnavailable': 'This Browser tab does not expose screenshot capture. Reopen annotation mode or update Harness.',
+  'error.captureGuestFailed': 'The Browser tab could not capture its viewport. Check that it is still open.',
   'error.guestHint': 'Click inside the page content, not on the tab frame',
   'prompt.head': 'Annotations from the app UI ({count}):',
   'prompt.item': '{index}. {label} — {comment}',
@@ -697,7 +708,15 @@ const DICT_RU = {
   'error.noSession': 'Сначала откройте чат, чтобы отправить аннотации',
   'error.sendFailed': 'Аннотации не отправились',
   'error.unsupportedApi': 'Эта версия Harness не поддерживает отправку изображений через drafts. Обновите Harness.',
-  'error.captureFailed': 'Не удалось снять скриншот. Удалите эту аннотацию и выберите меньшую видимую область.',
+  'error.captureFailed': 'Не удалось отрисовать скриншот. Выделите содержимое заново.',
+  'error.captureInvalid': 'Выделение вне видимой страницы или слишком мало. Выделите область заново.',
+  'error.captureTooLarge': 'Выделение превышает 2,5 миллиона CSS-пикселей. Выберите меньшую область.',
+  'error.captureAssets': 'Не удалось отрисовать изображение или стиль в выделении. Проверьте загрузку ресурсов страницы.',
+  'error.captureProtected': 'Выделение содержит защищённые пиксели canvas/видео, которые DOM-захват не может прочитать.',
+  'error.captureDecode': 'Браузер не смог декодировать скриншот. Часть содержимого страницы может не поддерживаться.',
+  'error.captureChanged': 'Во время снимка страница прокрутилась, изменила размер или перешла по ссылке. Выделите область заново.',
+  'error.captureGuestUnavailable': 'Эта вкладка Browser не предоставляет API снимков. Откройте аннотирование заново или обновите Harness.',
+  'error.captureGuestFailed': 'Вкладка Browser не смогла снять видимую страницу. Проверьте, что она ещё открыта.',
   'error.guestHint': 'Нажмите на содержимое страницы, а не на рамку вкладки',
   'prompt.head': 'Аннотации к интерфейсу ({count}):',
   'prompt.item': '{index}. {label} — {comment}',

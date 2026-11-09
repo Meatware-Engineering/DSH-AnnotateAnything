@@ -4,12 +4,73 @@ const { clipRect, pixelRect } = require('./region.cjs');
 const MAX_SHOT_AREA = 2500000;
 const UI = '[data-annot-ui]';
 
+class CaptureError extends Error {
+  constructor(code) { super(code); this.code = code; }
+}
+
+function captureErrorKey(error) {
+  const keys = { invalid: 'captureInvalid', tooLarge: 'captureTooLarge', assets: 'captureAssets',
+    protected: 'captureProtected', decode: 'captureDecode', changed: 'captureChanged',
+    guestUnavailable: 'captureGuestUnavailable', guest: 'captureGuestFailed' };
+  return 'error.' + (keys[error?.code] || (error?.name === 'SecurityError' ? 'captureProtected' : 'captureFailed'));
+}
+
+/** Keep layout placeholders for unrelated subtrees without reading their pixels or resources. */
+function boundedSnapshot(rect) {
+  const included = new Set([document.documentElement, document.body]);
+  const marker = 'data-annot-layout-' + Math.random().toString(36).slice(2);
+  for (const node of document.querySelectorAll('body *')) {
+    if (node.closest(UI)) continue;
+    const b = node.getBoundingClientRect();
+    if (b.width <= 0 || b.height <= 0 || b.right <= rect.x || b.left >= rect.x + rect.width ||
+        b.bottom <= rect.y || b.top >= rect.y + rect.height) continue;
+    for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) included.add(ancestor);
+  }
+  const layouts = [];
+  for (const parent of included) {
+    parent.setAttribute(marker, String(layouts.length));
+    const omitted = [];
+    Array.from(parent.childNodes).forEach((node, index) => {
+      if (node.nodeType !== 1 || included.has(node)) return;
+      const style = getComputedStyle(node);
+      let css = '';
+      for (const key of ['display', 'position', 'inset', 'inset-block', 'inset-inline', 'width', 'height',
+        'min-width', 'max-width', 'min-height', 'max-height', 'box-sizing', 'margin', 'padding', 'border-width',
+        'border-style', 'flex', 'order', 'align-self', 'justify-self', 'grid-area', 'float', 'clear',
+        'vertical-align', 'aspect-ratio', 'writing-mode', 'font-size', 'line-height', 'transform',
+        'transform-origin', 'translate', 'rotate', 'scale', 'zoom']) {
+        css += key + ':' + style.getPropertyValue(key) + ';';
+      }
+      omitted.push({ index, css });
+    });
+    layouts.push({ parent, omitted });
+  }
+  return {
+    filter: (node) => node.nodeType !== 1 || included.has(node),
+    restore: () => layouts.forEach(({ parent }) => parent.removeAttribute(marker)),
+    fill(svg) {
+      layouts.forEach(({ omitted }, id) => {
+        const parent = svg.querySelector('[' + marker + '="' + id + '"]');
+        if (!parent) return;
+        omitted.forEach(({ index, css }) => {
+          const placeholder = svg.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+          placeholder.style.cssText = css;
+          Object.assign(placeholder.style, { visibility: 'hidden', background: 'none', mask: 'none',
+            webkitMask: 'none', borderImageSource: 'none', listStyleImage: 'none', filter: 'none' });
+          parent.insertBefore(placeholder, parent.childNodes[index] || null);
+        });
+        parent.removeAttribute(marker);
+      });
+    },
+  };
+}
+
 async function cropDataUrl(data, rect, viewport) {
   const image = new Image();
   image.src = data;
-  await image.decode();
+  try { await image.decode(); } catch (_) { throw new CaptureError('decode'); }
   const crop = pixelRect(rect, viewport, { width: image.naturalWidth, height: image.naturalHeight });
-  if (!crop) throw new Error('Invalid screenshot bounds');
+  if (!crop) throw new CaptureError('invalid');
   const canvas = document.createElement('canvas');
   const scale = Math.min(1, 1600 / Math.max(crop.width, crop.height));
   canvas.width = Math.max(1, Math.round(crop.width * scale));
@@ -20,15 +81,19 @@ async function cropDataUrl(data, rect, viewport) {
 
 async function captureDom(el) {
   const rect = el.getBoundingClientRect();
-  if (rect.width < 2 || rect.height < 2 || rect.width * rect.height > MAX_SHOT_AREA) return null;
+  if (rect.width < 2 || rect.height < 2) throw new CaptureError('invalid');
+  if (rect.width * rect.height > MAX_SHOT_AREA) throw new CaptureError('tooLarge');
   const ratio = Math.min(2, Math.max(0.25, 1200 / Math.max(rect.width, rect.height)));
-  return toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false, filter: (node) => !node.matches?.(UI) });
+  try { return await toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false, filter: (node) => !node.matches?.(UI) }); }
+  catch (error) { throw new CaptureError(error?.name === 'SecurityError' ? 'protected' : 'assets'); }
 }
 
 async function captureHostRegion(rect) {
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const box = clipRect(rect, viewport.width, viewport.height, 4);
-  if (!box || box.width * box.height > MAX_SHOT_AREA) throw new Error('Invalid region size');
+  if (!box) throw new CaptureError('invalid');
+  if (box.width * box.height > MAX_SHOT_AREA) throw new CaptureError('tooLarge');
+  const snapshot = boundedSnapshot(box);
   // SVG serialization does not preserve scroll offsets. Mark only scrolling nodes,
   // then apply their offsets inside the detached snapshot, never to the live UI.
   const marker = 'data-annot-scroll-' + Math.random().toString(36).slice(2);
@@ -49,12 +114,17 @@ async function captureHostRegion(rect) {
   let data;
   try {
     data = await toSvg(document.documentElement, { width: viewport.width, height: viewport.height,
-      skipFonts: true, cacheBust: false, filter: (node) => !node.matches?.(UI) });
+      skipFonts: true, cacheBust: false, filter: snapshot.filter });
+  } catch (error) {
+    throw new CaptureError(error?.name === 'SecurityError' ? 'protected' : 'assets');
   } finally {
+    snapshot.restore();
     scrollers.forEach(({ node }) => node.removeAttribute(marker));
     positioned.forEach(({ node }) => node.removeAttribute(marker + '-position'));
   }
   const svg = new DOMParser().parseFromString(decodeURIComponent(data.slice(data.indexOf(',') + 1)), 'image/svg+xml');
+  if (svg.querySelector('parsererror')) throw new CaptureError('decode');
+  snapshot.fill(svg);
   for (const [index, scroll] of scrollers.entries()) {
     const node = svg.querySelector('[' + marker + '="' + index + '"]');
     if (!node) continue;
@@ -92,22 +162,26 @@ async function captureHostRegion(rect) {
 }
 
 async function captureGuest(wv, rect, expected) {
-  if (!wv || typeof wv.capturePage !== 'function') throw new Error('Guest capture unavailable');
+  if (!wv || typeof wv.capturePage !== 'function') throw new CaptureError('guestUnavailable');
   const prepare = `window.__dshAnnotate && window.__dshAnnotate.prepareCapture(${JSON.stringify(expected || null)})`;
   try {
     const viewport = await wv.executeJavaScript(prepare);
     const box = viewport && clipRect(rect, viewport.width, viewport.height, 2);
-    if (!box || box.width * box.height > MAX_SHOT_AREA) throw new Error('Guest selection changed');
+    if (!box) throw new CaptureError('changed');
+    if (box.width * box.height > MAX_SHOT_AREA) throw new CaptureError('tooLarge');
     // capturePage rectangle units vary with guest zoom; crop the actual raster
     // against the reported CSS viewport instead of assuming DPR or host offsets.
     const image = await wv.capturePage();
     const shot = await cropDataUrl(image.toDataURL(), box, viewport);
     const valid = await wv.executeJavaScript(`window.__dshAnnotate && window.__dshAnnotate.captureValid(${JSON.stringify(viewport)})`);
-    if (!valid) throw new Error('Guest moved during capture');
+    if (!valid) throw new CaptureError('changed');
     return shot;
+  } catch (error) {
+    if (error instanceof CaptureError) throw error;
+    throw new CaptureError('guest');
   } finally {
-    await wv.executeJavaScript('window.__dshAnnotate && window.__dshAnnotate.finishCapture()').catch(() => {});
+    try { await wv.executeJavaScript('window.__dshAnnotate && window.__dshAnnotate.finishCapture()'); } catch (_) {}
   }
 }
 
-module.exports = { cropDataUrl, captureDom, captureHostRegion, captureGuest };
+module.exports = { CaptureError, captureErrorKey, cropDataUrl, captureDom, captureHostRegion, captureGuest };

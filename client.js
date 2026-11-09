@@ -2114,99 +2114,102 @@ var require_lib = __commonJS({
 var require_region = __commonJS({
   "src/region.cjs"(exports2, module2) {
     "use strict";
-    function clipRect2(rect, width, height, minimum = 1) {
-      if (!rect || ![rect.x, rect.y, rect.width, rect.height, width, height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null;
-      const x = Math.max(0, Math.min(width, rect.x));
-      const y = Math.max(0, Math.min(height, rect.y));
-      const right = Math.max(0, Math.min(width, rect.x + rect.width));
-      const bottom = Math.max(0, Math.min(height, rect.y + rect.height));
-      if (right - x < minimum || bottom - y < minimum) return null;
-      return { x, y, width: right - x, height: bottom - y };
-    }
-    function dragRect(start, end, width, height, minimum = 4) {
-      return clipRect2({
-        x: Math.min(start.x, end.x),
-        y: Math.min(start.y, end.y),
-        width: Math.abs(end.x - start.x),
-        height: Math.abs(end.y - start.y)
-      }, width, height, minimum);
-    }
-    function pixelRect(rect, viewport, image) {
-      const box = clipRect2(rect, viewport.width, viewport.height);
-      if (!box || ![image.width, image.height].every(Number.isFinite) || image.width <= 0 || image.height <= 0) return null;
-      const sx = image.width / viewport.width, sy = image.height / viewport.height;
-      const x = Math.floor(box.x * sx), y = Math.floor(box.y * sy);
-      return {
-        x,
-        y,
-        width: Math.ceil((box.x + box.width) * sx) - x,
-        height: Math.ceil((box.y + box.height) * sy) - y
-      };
-    }
-    function installRegionPicker2(target, options) {
-      let drag = null;
-      const swallow = (event) => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      };
-      const cancel = () => {
-        const previous = drag;
-        drag = null;
-        if (previous) {
+    function createRegionTools() {
+      function clipRect2(rect, width, height, minimum = 1) {
+        if (!rect || ![rect.x, rect.y, rect.width, rect.height, width, height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null;
+        const x = Math.max(0, Math.min(width, rect.x));
+        const y = Math.max(0, Math.min(height, rect.y));
+        const right = Math.max(0, Math.min(width, rect.x + rect.width));
+        const bottom = Math.max(0, Math.min(height, rect.y + rect.height));
+        if (right - x < minimum || bottom - y < minimum) return null;
+        return { x, y, width: right - x, height: bottom - y };
+      }
+      function dragRect(start, end, width, height, minimum = 4) {
+        return clipRect2({
+          x: Math.min(start.x, end.x),
+          y: Math.min(start.y, end.y),
+          width: Math.abs(end.x - start.x),
+          height: Math.abs(end.y - start.y)
+        }, width, height, minimum);
+      }
+      function pixelRect(rect, viewport, image) {
+        const box = clipRect2(rect, viewport.width, viewport.height);
+        if (!box || ![image.width, image.height].every(Number.isFinite) || image.width <= 0 || image.height <= 0) return null;
+        const sx = image.width / viewport.width, sy = image.height / viewport.height;
+        const x = Math.floor(box.x * sx), y = Math.floor(box.y * sy);
+        return {
+          x,
+          y,
+          width: Math.ceil((box.x + box.width) * sx) - x,
+          height: Math.ceil((box.y + box.height) * sy) - y
+        };
+      }
+      function installRegionPicker2(target, options) {
+        let drag = null;
+        const swallow = (event) => {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        };
+        const cancel = () => {
+          const previous = drag;
+          drag = null;
+          if (previous) {
+            try {
+              previous.target.releasePointerCapture(previous.id);
+            } catch (_) {
+            }
+            options.preview(null);
+          }
+          return !!previous;
+        };
+        const down = (event) => {
+          if (options.ignore(event)) return;
+          swallow(event);
+          if (event.button !== 0 || event.isPrimary === false || options.blocked()) return;
+          cancel();
+          drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target, moved: false };
           try {
-            previous.target.releasePointerCapture(previous.id);
+            event.target.setPointerCapture(event.pointerId);
           } catch (_) {
           }
-          options.preview(null);
-        }
-        return !!previous;
-      };
-      const down = (event) => {
-        if (options.ignore(event)) return;
-        swallow(event);
-        if (event.button !== 0 || event.isPrimary === false || options.blocked()) return;
-        cancel();
-        drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target, moved: false };
-        try {
-          event.target.setPointerCapture(event.pointerId);
-        } catch (_) {
-        }
-      };
-      const move = (event) => {
-        if (!drag || drag.id !== event.pointerId) return;
-        swallow(event);
-        if (event.buttons === 0) {
+        };
+        const move = (event) => {
+          if (!drag || drag.id !== event.pointerId) return;
+          swallow(event);
+          if (event.buttons === 0) {
+            cancel();
+            return;
+          }
+          if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) >= 4) drag.moved = true;
+          if (!drag.moved) return;
+          const bounds = options.bounds();
+          options.preview(dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height, 1));
+        };
+        const up = (event) => {
+          if (!drag || drag.id !== event.pointerId) return;
+          swallow(event);
+          const start = drag;
+          const moved = start.moved || Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 4;
+          const bounds = options.bounds();
+          const rect = dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height);
           cancel();
-          return;
-        }
-        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) >= 4) drag.moved = true;
-        if (!drag.moved) return;
-        const bounds = options.bounds();
-        options.preview(dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height, 1));
-      };
-      const up = (event) => {
-        if (!drag || drag.id !== event.pointerId) return;
-        swallow(event);
-        const start = drag;
-        const moved = start.moved || Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 4;
-        const bounds = options.bounds();
-        const rect = dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height);
-        cancel();
-        if (moved) {
-          if (rect) options.select(rect);
-        } else options.click(start);
-      };
-      const lost = (event) => {
-        if (drag && drag.id === event.pointerId) cancel();
-      };
-      const listeners = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: lost, lostpointercapture: lost };
-      Object.entries(listeners).forEach(([name, handler]) => target.addEventListener(name, handler, true));
-      return { cancel, isDragging: () => !!drag?.moved, destroy() {
-        cancel();
-        Object.entries(listeners).forEach(([name, handler]) => target.removeEventListener(name, handler, true));
-      } };
+          if (moved) {
+            if (rect) options.select(rect);
+          } else options.click(start);
+        };
+        const lost = (event) => {
+          if (drag && drag.id === event.pointerId) cancel();
+        };
+        const listeners = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: lost, lostpointercapture: lost };
+        Object.entries(listeners).forEach(([name, handler]) => target.addEventListener(name, handler, true));
+        return { cancel, isDragging: () => !!drag?.moved, destroy() {
+          cancel();
+          Object.entries(listeners).forEach(([name, handler]) => target.removeEventListener(name, handler, true));
+        } };
+      }
+      return { clipRect: clipRect2, dragRect, pixelRect, installRegionPicker: installRegionPicker2 };
     }
-    module2.exports = { clipRect: clipRect2, dragRect, pixelRect, installRegionPicker: installRegionPicker2 };
+    module2.exports = { ...createRegionTools(), createRegionTools };
   }
 });
 
@@ -2218,12 +2221,120 @@ var require_capture = __commonJS({
     var { clipRect: clipRect2, pixelRect } = require_region();
     var MAX_SHOT_AREA = 25e5;
     var UI2 = "[data-annot-ui]";
+    var CaptureError2 = class extends Error {
+      constructor(code) {
+        super(code);
+        this.code = code;
+      }
+    };
+    function captureErrorKey2(error) {
+      const keys = {
+        invalid: "captureInvalid",
+        tooLarge: "captureTooLarge",
+        assets: "captureAssets",
+        protected: "captureProtected",
+        decode: "captureDecode",
+        changed: "captureChanged",
+        guestUnavailable: "captureGuestUnavailable",
+        guest: "captureGuestFailed"
+      };
+      return "error." + (keys[error?.code] || (error?.name === "SecurityError" ? "captureProtected" : "captureFailed"));
+    }
+    function boundedSnapshot(rect) {
+      const included = /* @__PURE__ */ new Set([document.documentElement, document.body]);
+      const marker = "data-annot-layout-" + Math.random().toString(36).slice(2);
+      for (const node of document.querySelectorAll("body *")) {
+        if (node.closest(UI2)) continue;
+        const b = node.getBoundingClientRect();
+        if (b.width <= 0 || b.height <= 0 || b.right <= rect.x || b.left >= rect.x + rect.width || b.bottom <= rect.y || b.top >= rect.y + rect.height) continue;
+        for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) included.add(ancestor);
+      }
+      const layouts = [];
+      for (const parent of included) {
+        parent.setAttribute(marker, String(layouts.length));
+        const omitted = [];
+        Array.from(parent.childNodes).forEach((node, index) => {
+          if (node.nodeType !== 1 || included.has(node)) return;
+          const style = getComputedStyle(node);
+          let css = "";
+          for (const key of [
+            "display",
+            "position",
+            "inset",
+            "inset-block",
+            "inset-inline",
+            "width",
+            "height",
+            "min-width",
+            "max-width",
+            "min-height",
+            "max-height",
+            "box-sizing",
+            "margin",
+            "padding",
+            "border-width",
+            "border-style",
+            "flex",
+            "order",
+            "align-self",
+            "justify-self",
+            "grid-area",
+            "float",
+            "clear",
+            "vertical-align",
+            "aspect-ratio",
+            "writing-mode",
+            "font-size",
+            "line-height",
+            "transform",
+            "transform-origin",
+            "translate",
+            "rotate",
+            "scale",
+            "zoom"
+          ]) {
+            css += key + ":" + style.getPropertyValue(key) + ";";
+          }
+          omitted.push({ index, css });
+        });
+        layouts.push({ parent, omitted });
+      }
+      return {
+        filter: (node) => node.nodeType !== 1 || included.has(node),
+        restore: () => layouts.forEach(({ parent }) => parent.removeAttribute(marker)),
+        fill(svg) {
+          layouts.forEach(({ omitted }, id) => {
+            const parent = svg.querySelector("[" + marker + '="' + id + '"]');
+            if (!parent) return;
+            omitted.forEach(({ index, css }) => {
+              const placeholder = svg.createElementNS("http://www.w3.org/1999/xhtml", "div");
+              placeholder.style.cssText = css;
+              Object.assign(placeholder.style, {
+                visibility: "hidden",
+                background: "none",
+                mask: "none",
+                webkitMask: "none",
+                borderImageSource: "none",
+                listStyleImage: "none",
+                filter: "none"
+              });
+              parent.insertBefore(placeholder, parent.childNodes[index] || null);
+            });
+            parent.removeAttribute(marker);
+          });
+        }
+      };
+    }
     async function cropDataUrl(data, rect, viewport) {
       const image = new Image();
       image.src = data;
-      await image.decode();
+      try {
+        await image.decode();
+      } catch (_) {
+        throw new CaptureError2("decode");
+      }
       const crop = pixelRect(rect, viewport, { width: image.naturalWidth, height: image.naturalHeight });
-      if (!crop) throw new Error("Invalid screenshot bounds");
+      if (!crop) throw new CaptureError2("invalid");
       const canvas = document.createElement("canvas");
       const scale = Math.min(1, 1600 / Math.max(crop.width, crop.height));
       canvas.width = Math.max(1, Math.round(crop.width * scale));
@@ -2233,14 +2344,21 @@ var require_capture = __commonJS({
     }
     async function captureDom2(el) {
       const rect = el.getBoundingClientRect();
-      if (rect.width < 2 || rect.height < 2 || rect.width * rect.height > MAX_SHOT_AREA) return null;
+      if (rect.width < 2 || rect.height < 2) throw new CaptureError2("invalid");
+      if (rect.width * rect.height > MAX_SHOT_AREA) throw new CaptureError2("tooLarge");
       const ratio = Math.min(2, Math.max(0.25, 1200 / Math.max(rect.width, rect.height)));
-      return toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false, filter: (node) => !node.matches?.(UI2) });
+      try {
+        return await toPng(el, { pixelRatio: ratio, skipFonts: true, cacheBust: false, filter: (node) => !node.matches?.(UI2) });
+      } catch (error) {
+        throw new CaptureError2(error?.name === "SecurityError" ? "protected" : "assets");
+      }
     }
     async function captureHostRegion2(rect) {
       const viewport = { width: window.innerWidth, height: window.innerHeight };
       const box = clipRect2(rect, viewport.width, viewport.height, 4);
-      if (!box || box.width * box.height > MAX_SHOT_AREA) throw new Error("Invalid region size");
+      if (!box) throw new CaptureError2("invalid");
+      if (box.width * box.height > MAX_SHOT_AREA) throw new CaptureError2("tooLarge");
+      const snapshot = boundedSnapshot(box);
       const marker = "data-annot-scroll-" + Math.random().toString(36).slice(2);
       const scrollers = [];
       const positioned = [];
@@ -2263,13 +2381,18 @@ var require_capture = __commonJS({
           height: viewport.height,
           skipFonts: true,
           cacheBust: false,
-          filter: (node) => !node.matches?.(UI2)
+          filter: snapshot.filter
         });
+      } catch (error) {
+        throw new CaptureError2(error?.name === "SecurityError" ? "protected" : "assets");
       } finally {
+        snapshot.restore();
         scrollers.forEach(({ node }) => node.removeAttribute(marker));
         positioned.forEach(({ node }) => node.removeAttribute(marker + "-position"));
       }
       const svg = new DOMParser().parseFromString(decodeURIComponent(data.slice(data.indexOf(",") + 1)), "image/svg+xml");
+      if (svg.querySelector("parsererror")) throw new CaptureError2("decode");
+      snapshot.fill(svg);
       for (const [index, scroll] of scrollers.entries()) {
         const node = svg.querySelector("[" + marker + '="' + index + '"]');
         if (!node) continue;
@@ -2338,23 +2461,29 @@ var require_capture = __commonJS({
       return cropDataUrl(data, box, viewport);
     }
     async function captureGuest2(wv, rect, expected) {
-      if (!wv || typeof wv.capturePage !== "function") throw new Error("Guest capture unavailable");
+      if (!wv || typeof wv.capturePage !== "function") throw new CaptureError2("guestUnavailable");
       const prepare = `window.__dshAnnotate && window.__dshAnnotate.prepareCapture(${JSON.stringify(expected || null)})`;
       try {
         const viewport = await wv.executeJavaScript(prepare);
         const box = viewport && clipRect2(rect, viewport.width, viewport.height, 2);
-        if (!box || box.width * box.height > MAX_SHOT_AREA) throw new Error("Guest selection changed");
+        if (!box) throw new CaptureError2("changed");
+        if (box.width * box.height > MAX_SHOT_AREA) throw new CaptureError2("tooLarge");
         const image = await wv.capturePage();
         const shot = await cropDataUrl(image.toDataURL(), box, viewport);
         const valid = await wv.executeJavaScript(`window.__dshAnnotate && window.__dshAnnotate.captureValid(${JSON.stringify(viewport)})`);
-        if (!valid) throw new Error("Guest moved during capture");
+        if (!valid) throw new CaptureError2("changed");
         return shot;
+      } catch (error) {
+        if (error instanceof CaptureError2) throw error;
+        throw new CaptureError2("guest");
       } finally {
-        await wv.executeJavaScript("window.__dshAnnotate && window.__dshAnnotate.finishCapture()").catch(() => {
-        });
+        try {
+          await wv.executeJavaScript("window.__dshAnnotate && window.__dshAnnotate.finishCapture()");
+        } catch (_) {
+        }
       }
     }
-    module2.exports = { cropDataUrl, captureDom: captureDom2, captureHostRegion: captureHostRegion2, captureGuest: captureGuest2 };
+    module2.exports = { CaptureError: CaptureError2, captureErrorKey: captureErrorKey2, cropDataUrl, captureDom: captureDom2, captureHostRegion: captureHostRegion2, captureGuest: captureGuest2 };
   }
 });
 
@@ -2467,13 +2596,12 @@ var require_lib2 = __commonJS({
 var require_guest = __commonJS({
   "src/guest.cjs"(exports2, module2) {
     "use strict";
-    var { clipRect: clipRect2, dragRect, installRegionPicker: installRegionPicker2 } = require_region();
+    var { createRegionTools } = require_region();
     var MARK2 = "__DSH_ANNOTATE__";
     var GUEST_INSTALL2 = `(function () {
   var MARK = '${MARK2}';
-  var clipRect = ${clipRect2.toString()};
-  var dragRect = ${dragRect.toString()};
-  var installRegionPicker = ${installRegionPicker2.toString()};
+  var tools = (${createRegionTools.toString()})();
+  var installRegionPicker = tools.installRegionPicker;
   var revision = 0;
   var instance = Math.random().toString(36).slice(2);
   var capturing = false;
@@ -2665,7 +2793,7 @@ var require_guest = __commonJS({
 
 // src/client.cjs
 var React = require("react");
-var { captureDom, captureHostRegion, captureGuest } = require_capture();
+var { CaptureError, captureErrorKey, captureDom, captureHostRegion, captureGuest } = require_capture();
 var { clipRect, installRegionPicker } = require_region();
 var { describeElement, dataUrlToBytes, formatAnnotations, clip } = require_lib2();
 var { MARK, GUEST_INSTALL, GUEST_REMOVE, GUEST_FREEZE, GUEST_RESUME } = require_guest();
@@ -2833,8 +2961,8 @@ function Overlay({ ctx, store, t }) {
     let shot = null;
     try {
       shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
-    } catch (_error) {
-      shot = null;
+    } catch (failure) {
+      setError(t(captureErrorKey(failure)));
     }
     if (!shot) return;
     setItems((prev) => prev.map((entry) => entry.id === item.id ? Object.assign({}, entry, { shot }) : entry));
@@ -2864,12 +2992,12 @@ function Overlay({ ctx, store, t }) {
     const pending = wv ? captureGuest(wv, rect, viewport) : captureHostRegion(rect);
     pending.then((shot) => {
       if (draftRef.current?.id !== current.id || !store.get().active) return;
-      if (current.epoch !== epochRef.current || !shot) throw new Error("Selection moved");
+      if (current.epoch !== epochRef.current || !shot) throw new CaptureError("changed");
       setDraft({ ...draftRef.current, shot, capturePending: false });
-    }).catch(() => {
+    }).catch((failure) => {
       if (draftRef.current?.id !== current.id) return;
-      setDraft(null);
-      setError(t("error.captureFailed"));
+      setDraft({ ...draftRef.current, capturePending: false });
+      setError(t(captureErrorKey(failure)));
     });
   };
   const openGuestPick = (wv, payload) => {
@@ -3117,16 +3245,22 @@ function Overlay({ ctx, store, t }) {
       for (let index = 0; index < itemsRef.current.length; index += 1) {
         const item = itemsRef.current[index];
         let shot = item.shot;
+        let captureFailure;
         if (!shot && item.kind !== "region") {
           try {
             shot = item.wv ? await captureGuest(item.wv, item.guestRect, item.guestViewport) : await captureDom(item.el);
-          } catch (_error) {
+          } catch (failure) {
+            captureFailure = failure;
             shot = null;
           }
         }
-        resolved.push(Object.assign({}, item, { shot }));
+        resolved.push(Object.assign({}, item, { shot, captureFailure }));
       }
-      if (resolved.some((item) => !item.shot)) throw new Error(t("error.captureFailed"));
+      const failed = resolved.find((item) => !item.shot);
+      if (failed) {
+        setError(t(captureErrorKey(failed.captureFailure)));
+        return;
+      }
       const files = [];
       resolved.forEach((item, index) => {
         if (!item.shot) return;
@@ -3248,7 +3382,7 @@ function Overlay({ ctx, store, t }) {
           { className: "dsh-annot-card__rows" },
           React.createElement("button", { key: "cancel", className: "dsh-annot-btn", onClick: () => setDraft(null) }, t("card.cancel")),
           draft.editing ? React.createElement("button", { key: "delete", className: "dsh-annot-btn dsh-annot-btn--danger", onClick: () => removeItem(draft.id) }, t("card.delete")) : null,
-          React.createElement("button", { key: "save", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: !!draft.capturePending, onClick: saveDraft }, t("card.save"))
+          React.createElement("button", { key: "save", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: !!draft.capturePending || draft.kind === "region" && !draft.shot, onClick: saveDraft }, t("card.save"))
         )
       )
     );
@@ -3316,7 +3450,15 @@ var DICT_EN = {
   "error.noSession": "Open a chat before sending annotations",
   "error.sendFailed": "The annotations were not sent",
   "error.unsupportedApi": "This Harness version does not support sending image drafts. Update Harness before sending.",
-  "error.captureFailed": "A screenshot could not be captured. Remove that annotation and select a smaller visible region.",
+  "error.captureFailed": "The screenshot could not be rendered. Select the content again.",
+  "error.captureInvalid": "The selection is outside the visible page or is too small. Select it again.",
+  "error.captureTooLarge": "The selection exceeds 2.5 million CSS pixels. Select a smaller area.",
+  "error.captureAssets": "An image or style in this selection could not be rendered. Check that the page resources have loaded.",
+  "error.captureProtected": "This selection contains protected or cross-origin canvas/video pixels that DOM capture cannot read.",
+  "error.captureDecode": "The browser could not decode the screenshot. Some page content may be unsupported.",
+  "error.captureChanged": "The page moved, resized or navigated during capture. Select the area again.",
+  "error.captureGuestUnavailable": "This Browser tab does not expose screenshot capture. Reopen annotation mode or update Harness.",
+  "error.captureGuestFailed": "The Browser tab could not capture its viewport. Check that it is still open.",
   "error.guestHint": "Click inside the page content, not on the tab frame",
   "prompt.head": "Annotations from the app UI ({count}):",
   "prompt.item": "{index}. {label} \u2014 {comment}",
@@ -3343,7 +3485,15 @@ var DICT_RU = {
   "error.noSession": "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0447\u0430\u0442, \u0447\u0442\u043E\u0431\u044B \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u0430\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u0438",
   "error.sendFailed": "\u0410\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u0438 \u043D\u0435 \u043E\u0442\u043F\u0440\u0430\u0432\u0438\u043B\u0438\u0441\u044C",
   "error.unsupportedApi": "\u042D\u0442\u0430 \u0432\u0435\u0440\u0441\u0438\u044F Harness \u043D\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442 \u043E\u0442\u043F\u0440\u0430\u0432\u043A\u0443 \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0439 \u0447\u0435\u0440\u0435\u0437 drafts. \u041E\u0431\u043D\u043E\u0432\u0438\u0442\u0435 Harness.",
-  "error.captureFailed": "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043D\u044F\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442. \u0423\u0434\u0430\u043B\u0438\u0442\u0435 \u044D\u0442\u0443 \u0430\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u044E \u0438 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043C\u0435\u043D\u044C\u0448\u0443\u044E \u0432\u0438\u0434\u0438\u043C\u0443\u044E \u043E\u0431\u043B\u0430\u0441\u0442\u044C.",
+  "error.captureFailed": "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u0440\u0438\u0441\u043E\u0432\u0430\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442. \u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0435 \u0437\u0430\u043D\u043E\u0432\u043E.",
+  "error.captureInvalid": "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u0432\u043D\u0435 \u0432\u0438\u0434\u0438\u043C\u043E\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B \u0438\u043B\u0438 \u0441\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u0430\u043B\u043E. \u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C \u0437\u0430\u043D\u043E\u0432\u043E.",
+  "error.captureTooLarge": "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0435\u0432\u044B\u0448\u0430\u0435\u0442 2,5 \u043C\u0438\u043B\u043B\u0438\u043E\u043D\u0430 CSS-\u043F\u0438\u043A\u0441\u0435\u043B\u0435\u0439. \u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u043C\u0435\u043D\u044C\u0448\u0443\u044E \u043E\u0431\u043B\u0430\u0441\u0442\u044C.",
+  "error.captureAssets": "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u0440\u0438\u0441\u043E\u0432\u0430\u0442\u044C \u0438\u0437\u043E\u0431\u0440\u0430\u0436\u0435\u043D\u0438\u0435 \u0438\u043B\u0438 \u0441\u0442\u0438\u043B\u044C \u0432 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0438. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0437\u0430\u0433\u0440\u0443\u0437\u043A\u0443 \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B.",
+  "error.captureProtected": "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u0442 \u0437\u0430\u0449\u0438\u0449\u0451\u043D\u043D\u044B\u0435 \u043F\u0438\u043A\u0441\u0435\u043B\u0438 canvas/\u0432\u0438\u0434\u0435\u043E, \u043A\u043E\u0442\u043E\u0440\u044B\u0435 DOM-\u0437\u0430\u0445\u0432\u0430\u0442 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u043F\u0440\u043E\u0447\u0438\u0442\u0430\u0442\u044C.",
+  "error.captureDecode": "\u0411\u0440\u0430\u0443\u0437\u0435\u0440 \u043D\u0435 \u0441\u043C\u043E\u0433 \u0434\u0435\u043A\u043E\u0434\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442. \u0427\u0430\u0441\u0442\u044C \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0433\u043E \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B \u043C\u043E\u0436\u0435\u0442 \u043D\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0442\u044C\u0441\u044F.",
+  "error.captureChanged": "\u0412\u043E \u0432\u0440\u0435\u043C\u044F \u0441\u043D\u0438\u043C\u043A\u0430 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0430 \u043F\u0440\u043E\u043A\u0440\u0443\u0442\u0438\u043B\u0430\u0441\u044C, \u0438\u0437\u043C\u0435\u043D\u0438\u043B\u0430 \u0440\u0430\u0437\u043C\u0435\u0440 \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0448\u043B\u0430 \u043F\u043E \u0441\u0441\u044B\u043B\u043A\u0435. \u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C \u0437\u0430\u043D\u043E\u0432\u043E.",
+  "error.captureGuestUnavailable": "\u042D\u0442\u0430 \u0432\u043A\u043B\u0430\u0434\u043A\u0430 Browser \u043D\u0435 \u043F\u0440\u0435\u0434\u043E\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442 API \u0441\u043D\u0438\u043C\u043A\u043E\u0432. \u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0430\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435 \u0437\u0430\u043D\u043E\u0432\u043E \u0438\u043B\u0438 \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u0435 Harness.",
+  "error.captureGuestFailed": "\u0412\u043A\u043B\u0430\u0434\u043A\u0430 Browser \u043D\u0435 \u0441\u043C\u043E\u0433\u043B\u0430 \u0441\u043D\u044F\u0442\u044C \u0432\u0438\u0434\u0438\u043C\u0443\u044E \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u0443. \u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435, \u0447\u0442\u043E \u043E\u043D\u0430 \u0435\u0449\u0451 \u043E\u0442\u043A\u0440\u044B\u0442\u0430.",
   "error.guestHint": "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0435 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B, \u0430 \u043D\u0435 \u043D\u0430 \u0440\u0430\u043C\u043A\u0443 \u0432\u043A\u043B\u0430\u0434\u043A\u0438",
   "prompt.head": "\u0410\u043D\u043D\u043E\u0442\u0430\u0446\u0438\u0438 \u043A \u0438\u043D\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0443 ({count}):",
   "prompt.item": "{index}. {label} \u2014 {comment}",

@@ -5,15 +5,14 @@
  * cross-origin guest document is otherwise unreachable from the Harness page.
  * The guest owns its hover highlight and reports picks through console text.
  */
-const { clipRect, dragRect, installRegionPicker } = require('./region.cjs');
+const { createRegionTools } = require('./region.cjs');
 
 const MARK = '__DSH_ANNOTATE__';
 
 const GUEST_INSTALL = `(function () {
   var MARK = '${MARK}';
-  var clipRect = ${clipRect.toString()};
-  var dragRect = ${dragRect.toString()};
-  var installRegionPicker = ${installRegionPicker.toString()};
+  var tools = (${createRegionTools.toString()})();
+  var installRegionPicker = tools.installRegionPicker;
   var revision = 0;
   var instance = Math.random().toString(36).slice(2);
   var capturing = false;

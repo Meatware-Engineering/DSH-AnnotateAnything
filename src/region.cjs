@@ -1,5 +1,8 @@
 'use strict';
 
+// Serialize one closed scope: bundlers may rename its private helpers safely.
+function createRegionTools() {
+
 function clipRect(rect, width, height, minimum = 1) {
   if (!rect || ![rect.x, rect.y, rect.width, rect.height, width, height].every(Number.isFinite) ||
       rect.width <= 0 || rect.height <= 0 || width <= 0 || height <= 0) return null;
@@ -76,4 +79,7 @@ function installRegionPicker(target, options) {
   } };
 }
 
-module.exports = { clipRect, dragRect, pixelRect, installRegionPicker };
+return { clipRect, dragRect, pixelRect, installRegionPicker };
+}
+
+module.exports = { ...createRegionTools(), createRegionTools };

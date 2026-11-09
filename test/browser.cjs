@@ -7,30 +7,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const fixture = buildSync({ stdin: { contents: `
-const React = require('react');
-const { createRoot } = require('react-dom/client');
-const plugin = require('./src/client.cjs');
-const registrations = {};
-let dict;
-const ctx = {
- effect(fn) { fn(); },
- locale: { register(ns, value) { dict = value.en; }, bind() { return (key, params = {}) =>
-   (dict[key] || key).replace(/\\{(\\w+)\\}/g, (_, name) => params[name] ?? ''); } },
- slots: { inject(name, fn) { fn(); }, register(spec, fn) { registrations[spec.id] = fn; } },
- get(name) {
-   if (name === 'sessions') return { binding: () => ({ session: { id: 'test' } }) };
-   if (name === 'conversation') return {
-     createDrafts(id, files) { window.attachments = files; return files.map((_, i) => ({ id: 'file-' + i })); },
-     async sendSession(session, text, ids) { window.sent = { text, ids }; return { kind: 'success' }; }
-   };
- }
-};
-plugin.apply(ctx);
-createRoot(document.getElementById('controls')).render(React.createElement(React.Fragment, null,
- registrations['annotate-anything-trigger']({ sessionId: 'test' }), registrations['annotate-anything-overlay']()));
-`, resolveDir: path.join(__dirname, '..') }, bundle: true, platform: 'browser', write: false,
-  nodePaths: (process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean) }).outputFiles[0].text;
+const { mount } = require('./fixture.cjs');
 const { GUEST_INSTALL } = require('../src/guest.cjs');
 const captureBundle = buildSync({ stdin: { contents: `window.capture = require('./src/capture.cjs')`, resolveDir: path.join(__dirname, '..') },
   bundle: true, platform: 'browser', write: false }).outputFiles[0].text;
@@ -82,7 +59,7 @@ async function saveAndSend(page, comment) {
       const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: dpr });
       const page = await context.newPage();
       const failures = []; page.on('pageerror', (e) => failures.push(e.message));
-      await page.setContent(html); await page.addScriptTag({ content: fixture });
+      await page.setContent(html); await mount(page);
       await page.getByRole('button', { name: 'Annotate', exact: true }).click();
       assert.equal(await page.getByRole('button', { name: /^(Region|Element)$/ }).count(),0);
       // Click/jitter keeps element picking; dragging changes automatically to a rectangle.
@@ -165,7 +142,7 @@ async function saveAndSend(page, comment) {
       wv.executeJavaScript = (code) => window.guestExec(code);
       wv.capturePage = async () => { const data = await window.guestCapture(); return { toDataURL: () => 'data:image/png;base64,' + data }; };
     });
-    await host.addScriptTag({ content: fixture });
+    await mount(host);
     await host.getByRole('button', { name: 'Annotate', exact: true }).click();
     assert.equal(await host.getByRole('button', { name: /^(Region|Element)$/ }).count(),0);
     await guest.waitForFunction(() => !!window.__dshAnnotate);
@@ -195,7 +172,7 @@ async function saveAndSend(page, comment) {
       wv.capturePage = async () => { throw new Error('test capture failure'); };
       try { await capture.captureGuest(wv, {x:10,y:10,width:100,height:100}); } catch (e) { return e.message; }
     });
-    assert.equal(failure, 'test capture failure');
+    assert.equal(failure, 'guest');
     const state = await guest.evaluate(async () => {
       const api=window.__dshAnnotate;
       const first=await api.prepareCapture(null); api.finishCapture();

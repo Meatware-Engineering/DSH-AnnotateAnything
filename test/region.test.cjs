@@ -4,6 +4,19 @@ const assert = require('node:assert/strict');
 const { clipRect, dragRect, pixelRect, installRegionPicker } = require('../src/region.cjs');
 const { formatAnnotations } = require('../src/lib.cjs');
 
+test('bundled picker helpers survive serialization into an isolated guest scope', () => {
+  const vm = require('node:vm');
+  const path = require('node:path');
+  const { buildSync } = require('esbuild');
+  const code = buildSync({ stdin: { contents: "module.exports = require('./src/region.cjs').createRegionTools;",
+    resolveDir: path.join(__dirname, '..') }, bundle: true, platform: 'browser', format: 'cjs', write: false }).outputFiles[0].text;
+  const context = { module: { exports: {} } };
+  vm.runInNewContext(code, context);
+  const tools = vm.runInNewContext('(' + context.module.exports.toString() + ')()');
+  const rect = tools.dragRect({ x: 80, y: 90 }, { x: 10, y: 20 }, 100, 100);
+  assert.deepEqual(JSON.parse(JSON.stringify(rect)), { x: 10, y: 20, width: 70, height: 70 });
+});
+
 test('region normalization handles all drag directions and viewport clipping', () => {
   for (const [a, b] of [[{ x: 10, y: 20 }, { x: 80, y: 90 }], [{ x: 80, y: 90 }, { x: 10, y: 20 }],
     [{ x: 80, y: 20 }, { x: 10, y: 90 }], [{ x: 10, y: 90 }, { x: 80, y: 20 }]]) {
