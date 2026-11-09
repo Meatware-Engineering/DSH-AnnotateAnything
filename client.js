@@ -2162,11 +2162,11 @@ var require_region = __commonJS({
         return !!previous;
       };
       const down = (event) => {
-        if (!options.enabled() || options.ignore(event)) return;
+        if (options.ignore(event)) return;
         swallow(event);
         if (event.button !== 0 || event.isPrimary === false || options.blocked()) return;
         cancel();
-        drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target };
+        drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target, moved: false };
         try {
           event.target.setPointerCapture(event.pointerId);
         } catch (_) {
@@ -2179,23 +2179,29 @@ var require_region = __commonJS({
           cancel();
           return;
         }
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) >= 4) drag.moved = true;
+        if (!drag.moved) return;
         const bounds = options.bounds();
         options.preview(dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height, 1));
       };
       const up = (event) => {
         if (!drag || drag.id !== event.pointerId) return;
         swallow(event);
+        const start = drag;
+        const moved = start.moved || Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 4;
         const bounds = options.bounds();
         const rect = dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height);
         cancel();
-        if (rect) options.select(rect);
+        if (moved) {
+          if (rect) options.select(rect);
+        } else options.click(start);
       };
       const lost = (event) => {
         if (drag && drag.id === event.pointerId) cancel();
       };
       const listeners = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: lost, lostpointercapture: lost };
       Object.entries(listeners).forEach(([name, handler]) => target.addEventListener(name, handler, true));
-      return { cancel, destroy() {
+      return { cancel, isDragging: () => !!drag?.moved, destroy() {
         cancel();
         Object.entries(listeners).forEach(([name, handler]) => target.removeEventListener(name, handler, true));
       } };
@@ -2468,7 +2474,6 @@ var require_guest = __commonJS({
   var clipRect = ${clipRect2.toString()};
   var dragRect = ${dragRect.toString()};
   var installRegionPicker = ${installRegionPicker2.toString()};
-  var mode = '__MODE__';
   var revision = 0;
   var instance = Math.random().toString(36).slice(2);
   var capturing = false;
@@ -2552,7 +2557,7 @@ var require_guest = __commonJS({
   function reportScroll() {
     revision += 1;
     if (picker) picker.cancel();
-    if (mode === 'region') hide();
+    hide();
     if (frozen && frozenEl && frozenEl.isConnected) show(frozenEl);
     if (scrollFrame) return;
     scrollFrame = requestAnimationFrame(function () {
@@ -2563,15 +2568,14 @@ var require_guest = __commonJS({
   window.addEventListener('scroll', reportScroll, true);
   window.addEventListener('resize', reportScroll, true);
   layer.addEventListener('mousemove', function (event) {
-    if (frozen || mode === 'region' || capturing) return;
+    if (frozen || capturing || picker.isDragging()) return;
     show(hit(event.clientX, event.clientY));
   });
   layer.addEventListener('mousedown', function (event) { event.preventDefault(); event.stopPropagation(); }, true);
-  layer.addEventListener('click', function (event) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (frozen || mode === 'region' || capturing) return;
-    var el = hit(event.clientX, event.clientY);
+  layer.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); }, true);
+  function pickElement(point) {
+    if (frozen || capturing) return;
+    var el = hit(point.x, point.y);
     if (!el) return;
     frozen = true;
     frozenEl = el;
@@ -2580,12 +2584,12 @@ var require_guest = __commonJS({
     info.viewport = viewport();
     info.scroll = { x: window.scrollX, y: window.scrollY };
     try { console.log(MARK + JSON.stringify(info)); } catch (error) {}
-  }, true);
+  }
   picker = installRegionPicker(layer, {
-    enabled: function () { return mode === 'region'; },
     ignore: function () { return false; },
     blocked: function () { return frozen || capturing; },
     bounds: viewport,
+    click: pickElement,
     preview: function (rect) {
       hide();
       if (!rect) return;
@@ -2677,7 +2681,6 @@ var CSS2 = `
 .dsh-annot-bar__count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);font-weight:600}
 .dsh-annot-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-radius:7px;padding:4px 10px;font:12px/1.3 inherit;cursor:pointer;white-space:nowrap}
 .dsh-annot-btn:hover:enabled{background:var(--dsw-alias-bg-layer-2)}
-.dsh-annot-btn[aria-pressed=true]{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 .dsh-annot-btn:disabled{opacity:.5;cursor:default}
 .dsh-annot-btn--primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff)}
 .dsh-annot-btn--primary:hover:enabled{filter:brightness(1.06)}
@@ -2754,7 +2757,6 @@ function Overlay({ ctx, store, t }) {
   const [hover, setHover] = React.useState(null);
   const [items, setItems] = React.useState([]);
   const [draft, setDraftState] = React.useState(null);
-  const [mode, setMode] = React.useState("element");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
   const [, setTick] = React.useState(0);
@@ -2920,7 +2922,7 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     if (!isActive) return void 0;
     const onMove = (event) => {
-      if (mode === "region" || draftRef.current || busyRef.current) return;
+      if (regionPickerRef.current?.isDragging() || draftRef.current || busyRef.current) return;
       if (event.target instanceof Element && event.target.closest(UI)) return;
       const el = pickAt(event.clientX, event.clientY);
       if (!el) {
@@ -2938,12 +2940,9 @@ function Overlay({ ctx, store, t }) {
       }
       setHover({ x: rect.left, y: rect.top, width: rect.width, height: rect.height, desc: describeElement(el) });
     };
-    const onClick = (event) => {
-      if (event.target instanceof Element && event.target.closest(UI)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (mode === "region" || draftRef.current || busyRef.current) return;
-      const el = pickAt(event.clientX, event.clientY);
+    const pickElement = ({ x, y }) => {
+      if (draftRef.current || busyRef.current) return;
+      const el = pickAt(x, y);
       if (!el) return;
       if (String(el.tagName).toLowerCase() === "webview") {
         setError(t("error.guestHint"));
@@ -2981,11 +2980,11 @@ function Overlay({ ctx, store, t }) {
       invalidate();
     };
     const picker = installRegionPicker(document, {
-      enabled: () => mode === "region",
       ignore: (event) => event.target instanceof Element && !!event.target.closest(UI),
       blocked: () => !!draftRef.current || busyRef.current,
       bounds: () => ({ width: innerWidth, height: innerHeight }),
       preview: setHover,
+      click: pickElement,
       select: (rect) => {
         const overlapsGuest = Array.from(document.querySelectorAll("webview")).some((wv) => {
           const b = wv.getBoundingClientRect();
@@ -3004,7 +3003,7 @@ function Overlay({ ctx, store, t }) {
     document.addEventListener("mousemove", onMove, true);
     document.addEventListener("mousedown", stop, true);
     document.addEventListener("pointerdown", stop, true);
-    document.addEventListener("click", onClick, true);
+    document.addEventListener("click", stop, true);
     document.addEventListener("keydown", onKey, true);
     window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onScroll, true);
@@ -3014,7 +3013,7 @@ function Overlay({ ctx, store, t }) {
         const rect = wv.getBoundingClientRect();
         if (rect.width < 4 || rect.height < 4) continue;
         try {
-          const pending = wv.executeJavaScript(guestInstallScript(mode));
+          const pending = wv.executeJavaScript(guestInstallScript());
           if (pending && typeof pending.catch === "function") pending.catch(() => {
           });
         } catch (_error) {
@@ -3043,10 +3042,9 @@ function Overlay({ ctx, store, t }) {
             if (!rect2) return;
             scrollRef.current.set(wv, { x: viewport.x, y: viewport.y });
             if (payload.kind === "region") {
-              if (mode === "region") openRegion(rect2, wv, viewport);
+              openRegion(rect2, wv, viewport);
               return;
             }
-            if (mode !== "element") return;
             openGuestPick(wv, {
               tag: clip(payload.tag, 40),
               label: clip(payload.label, 90),
@@ -3087,13 +3085,13 @@ function Overlay({ ctx, store, t }) {
       document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("mousedown", stop, true);
       document.removeEventListener("pointerdown", stop, true);
-      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("click", stop, true);
       document.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onScroll, true);
       uninstall();
     };
-  }, [isActive, mode, store, t]);
+  }, [isActive, store, t]);
   React.useEffect(() => {
     if (!isActive) {
       setDraft(null);
@@ -3156,18 +3154,7 @@ function Overlay({ ctx, store, t }) {
     React.createElement(
       "div",
       { key: "bar", "data-annot-ui": "bar", className: "dsh-annot-bar" },
-      React.createElement("span", { className: "dsh-annot-bar__hint" }, t(draft ? draft.capturePending ? "bar.capturing" : "bar.hintDraft" : mode === "region" ? "bar.regionHint" : "bar.hint")),
-      ...["element", "region"].map((value) => React.createElement("button", {
-        key: value,
-        type: "button",
-        className: "dsh-annot-btn",
-        "aria-pressed": mode === value,
-        disabled: !!draft || busy,
-        onClick: () => {
-          setHover(null);
-          setMode(value);
-        }
-      }, t("mode." + value))),
+      React.createElement("span", { className: "dsh-annot-bar__hint" }, t(draft ? draft.capturePending ? "bar.capturing" : "bar.hintDraft" : "bar.hint")),
       React.createElement("span", { className: "dsh-annot-bar__count" }, String(items.length)),
       ...items.flatMap((item, index) => item.kind === "region" && item.epoch !== epochRef.current ? [
         React.createElement("button", {
@@ -3269,12 +3256,12 @@ function Overlay({ ctx, store, t }) {
   if (error) children.push(React.createElement("div", { key: "error", "data-annot-ui": "error", className: "dsh-annot-error" }, error));
   return React.createElement("div", { "data-annot-ui": "layer", className: "dsh-annot-layer" }, children);
 }
-function guestInstallScript(mode) {
+function guestInstallScript() {
   const root = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (root.getPropertyValue(name) || "").trim() || fallback;
   const accent = read("--dsw-alias-button-primary-fill", read("--dsw-alias-brand-primary", "#3b82f6"));
   const onAccent = read("--dsw-alias-label-primary-foreground", "#fff");
-  return GUEST_INSTALL.replace("__MODE__", mode || "element").split("__ACCENT__").join(accent).split("__ON_ACCENT__").join(onAccent);
+  return GUEST_INSTALL.split("__ACCENT__").join(accent).split("__ON_ACCENT__").join(onAccent);
 }
 function apply(ctx) {
   ctx.effect(() => {
@@ -3312,11 +3299,8 @@ function apply(ctx) {
 }
 var DICT_EN = {
   "trigger.title": "Annotate",
-  "bar.hint": "Click an element to annotate it",
-  "mode.element": "Element",
-  "mode.region": "Region",
+  "bar.hint": "Click an element or drag a region",
   "region.label": "Selected region",
-  "bar.regionHint": "Drag to select a visible region",
   "bar.capturing": "Capturing\u2026",
   "prompt.region": "   {surface} region (CSS px): x={x}, y={y}, width={width}, height={height}",
   "bar.hintDraft": "Describe the annotation",
@@ -3342,11 +3326,8 @@ var DICT_EN = {
 };
 var DICT_RU = {
   "trigger.title": "\u0410\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
-  "bar.hint": "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u044D\u043B\u0435\u043C\u0435\u043D\u0442, \u0447\u0442\u043E\u0431\u044B \u0430\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0435\u0433\u043E",
-  "mode.element": "\u042D\u043B\u0435\u043C\u0435\u043D\u0442",
-  "mode.region": "\u041E\u0431\u043B\u0430\u0441\u0442\u044C",
+  "bar.hint": "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u0438\u043B\u0438 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C \u043F\u0435\u0440\u0435\u0442\u0430\u0441\u043A\u0438\u0432\u0430\u043D\u0438\u0435\u043C",
   "region.label": "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u0430\u044F \u043E\u0431\u043B\u0430\u0441\u0442\u044C",
-  "bar.regionHint": "\u0417\u0430\u0436\u043C\u0438\u0442\u0435 \u043A\u043D\u043E\u043F\u043A\u0443 \u0438 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C",
   "bar.capturing": "\u0421\u043D\u0438\u043C\u043E\u043A\u2026",
   "prompt.region": "   \u041E\u0431\u043B\u0430\u0441\u0442\u044C {surface} (CSS px): x={x}, y={y}, \u0448\u0438\u0440\u0438\u043D\u0430={width}, \u0432\u044B\u0441\u043E\u0442\u0430={height}",
   "bar.hintDraft": "\u041E\u043F\u0438\u0448\u0438\u0442\u0435, \u0447\u0442\u043E \u0437\u0434\u0435\u0441\u044C \u043D\u0435 \u0442\u0430\u043A",

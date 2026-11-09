@@ -31,8 +31,18 @@ fs.writeFileSync(path.join(root,'main.cjs'), `const {app,BrowserWindow}=require(
   for(const zoom of [1,1.5,2]){
     await page.evaluate(async(zoom)=>{const wv=document.querySelector('webview');wv.setZoomFactor(zoom);await wv.executeJavaScript('scrollTo(0,400)');},zoom);
     await page.waitForTimeout(100);
-    await page.evaluate((code)=>document.querySelector('webview').executeJavaScript(code),GUEST_INSTALL.replace('__MODE__','region').replaceAll('__ACCENT__','#ff0000').replaceAll('__ON_ACCENT__','#fff'));
+    await page.evaluate((code)=>document.querySelector('webview').executeJavaScript(code),GUEST_INSTALL.replaceAll('__ACCENT__','#ff0000').replaceAll('__ON_ACCENT__','#fff'));
     await page.evaluate(()=>{window.lastGuestPick=null;});
+    await app.evaluate(({webContents},id)=>{
+      const guest=webContents.fromId(id); guest.focus();
+      guest.sendInputEvent({type:'mouseDown',x:100,y:100,button:'left',clickCount:1});
+      guest.sendInputEvent({type:'mouseUp',x:100,y:100,button:'left',clickCount:1});
+    },id);
+    await page.waitForFunction(()=>window.lastGuestPick?.kind==='pick');
+    await page.evaluate(async()=>{
+      await document.querySelector('webview').executeJavaScript('window.__dshAnnotate.resume()');
+      window.lastGuestPick=null;
+    });
     await app.evaluate(({webContents},id)=>{
       const guest=webContents.fromId(id); guest.focus();
       guest.sendInputEvent({type:'mouseMove',x:400,y:300});
@@ -40,7 +50,7 @@ fs.writeFileSync(path.join(root,'main.cjs'), `const {app,BrowserWindow}=require(
       guest.sendInputEvent({type:'mouseMove',x:100,y:100,button:'left',modifiers:['leftButtonDown']});
       guest.sendInputEvent({type:'mouseUp',x:100,y:100,button:'left',clickCount:1});
     },id);
-    await page.waitForFunction(()=>!!window.lastGuestPick);
+    await page.waitForFunction(()=>window.lastGuestPick?.kind==='region');
     const result=await page.evaluate(async()=>{
       const {rect,viewport}=window.lastGuestPick;
       const url=await capture.captureGuest(document.querySelector('webview'),rect,viewport);
@@ -53,7 +63,7 @@ fs.writeFileSync(path.join(root,'main.cjs'), `const {app,BrowserWindow}=require(
     const expectedRatio=result.rect.width/result.rect.height;
     assert.ok(Math.abs(result.width/result.height-expectedRatio)<0.03);
     fs.writeFileSync(path.join(root,'guest-zoom-'+zoom+'.png'),Buffer.from(result.url.split(',')[1],'base64'));
-    console.log('PASS native Electron webview zoom='+zoom+' crop='+result.width+'x'+result.height+' CSS rect='+JSON.stringify(result.rect));
+    console.log('PASS native Electron webview click+drag zoom='+zoom+' crop='+result.width+'x'+result.height+' CSS rect='+JSON.stringify(result.rect));
   }
   console.log('Native PNG evidence: '+root);
  } finally {await app.close();}

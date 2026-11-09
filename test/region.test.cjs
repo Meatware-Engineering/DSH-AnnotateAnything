@@ -31,17 +31,17 @@ test('raster crop uses independent image-to-viewport ratios, including fractiona
 });
 
 function pickerHarness() {
-  const handlers = {}, selected = [], previews = [];
+  const handlers = {}, selected = [], previews = [], clicks = [];
   const target = { addEventListener: (n, f) => { handlers[n] = f; }, removeEventListener: (n) => { delete handlers[n]; } };
-  const picker = installRegionPicker(target, { enabled: () => true, blocked: () => false, ignore: (e) => e.ui,
-    bounds: () => ({ width: 100, height: 100 }), preview: (r) => previews.push(r), select: (r) => selected.push(r) });
+  const picker = installRegionPicker(target, { blocked: () => false, ignore: (e) => e.ui,
+    bounds: () => ({ width: 100, height: 100 }), preview: (r) => previews.push(r), click: (point) => clicks.push(point), select: (r) => selected.push(r) });
   function fire(name, values = {}) {
     const e = { target: { setPointerCapture() {}, releasePointerCapture() {} }, button: 0, buttons: 1, pointerId: 1,
       clientX: 10, clientY: 10, preventDefault() { this.prevented = true; }, stopImmediatePropagation() {}, ...values };
     handlers[name]?.(e);
     return e;
   }
-  return { handlers, selected, previews, picker, fire };
+  return { handlers, selected, previews, clicks, picker, fire };
 }
 
 test('pointer picker captures reverse outside release and allows repeated selections', () => {
@@ -60,7 +60,7 @@ test('cancel, lost capture, pointercancel, no held button and UI controls abort 
     if (reason === 'cancel') assert.equal(h.picker.cancel(), true);
     else h.fire(reason, { buttons: 0 });
     h.fire('pointerup', { clientX: 90, clientY: 90 });
-    assert.equal(h.selected.length, 0);
+    assert.equal(h.selected.length, 0); assert.equal(h.clicks.length, 0);
     h.picker.destroy(); assert.deepEqual(Object.keys(h.handlers), []);
   }
   const h = pickerHarness();
@@ -77,4 +77,30 @@ test('mixed annotations retain order and region geometry without inventing a sel
   assert.deepEqual(calls.map(([key]) => key), ['prompt.head', 'prompt.item', 'prompt.where', 'prompt.item', 'prompt.region']);
   assert.equal(calls[3][1].index, 2);
   assert.deepEqual(calls[4][1], { surface: 'browser', x: 1, y: 2, width: 30, height: 40 });
+});
+
+
+test('click and sub-threshold jitter pick the original element; threshold starts a region', () => {
+  for (const offset of [0, 1, 3.99]) {
+    const h = pickerHarness(); h.fire('pointerdown');
+    h.fire('pointermove', { clientX: 10 + offset });
+    assert.equal(h.picker.isDragging(), false);
+    h.fire('pointerup', { clientX: 10 + offset });
+    assert.equal(h.clicks.length, 1); assert.equal(h.clicks[0].x, 10);
+    assert.equal(h.selected.length, 0);
+  }
+  const h = pickerHarness(); h.fire('pointerdown');
+  h.fire('pointermove', { clientX: 14 });
+  assert.equal(h.picker.isDragging(), true);
+  h.fire('pointerup', { clientX: 14, clientY: 14 });
+  assert.equal(h.selected.length, 1); assert.equal(h.clicks.length, 0);
+});
+
+test('a thin drag or a drag returning to its start never falls back to an element click', () => {
+  for (const end of [{ clientX: 11, clientY: 70 }, { clientX: 10, clientY: 10 }]) {
+    const h = pickerHarness(); h.fire('pointerdown');
+    h.fire('pointermove', { clientX: 60, clientY: 60 });
+    h.fire('pointerup', end);
+    assert.equal(h.selected.length, 0); assert.equal(h.clicks.length, 0);
+  }
 });

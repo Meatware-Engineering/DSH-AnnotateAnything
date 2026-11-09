@@ -25,7 +25,8 @@ function pixelRect(rect, viewport, image) {
     height: Math.ceil((box.y + box.height) * sy) - y };
 }
 
-/** Shared by the host and serialized guest. Pointer capture keeps outside releases safe. */
+/** A click picks an element; 4 CSS pixels of movement starts a region gesture.
+ * Shared by the host and serialized guest; capture keeps outside releases safe. */
 function installRegionPicker(target, options) {
   let drag = null;
   const swallow = (event) => { event.preventDefault(); event.stopImmediatePropagation(); };
@@ -39,32 +40,37 @@ function installRegionPicker(target, options) {
     return !!previous;
   };
   const down = (event) => {
-    if (!options.enabled() || options.ignore(event)) return;
+    if (options.ignore(event)) return;
     swallow(event);
     if (event.button !== 0 || event.isPrimary === false || options.blocked()) return;
     cancel();
-    drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target };
+    drag = { x: event.clientX, y: event.clientY, id: event.pointerId, target: event.target, moved: false };
     try { event.target.setPointerCapture(event.pointerId); } catch (_) {}
   };
   const move = (event) => {
     if (!drag || drag.id !== event.pointerId) return;
     swallow(event);
     if (event.buttons === 0) { cancel(); return; }
+    if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) >= 4) drag.moved = true;
+    if (!drag.moved) return;
     const bounds = options.bounds();
     options.preview(dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height, 1));
   };
   const up = (event) => {
     if (!drag || drag.id !== event.pointerId) return;
     swallow(event);
+    const start = drag;
+    const moved = start.moved || Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 4;
     const bounds = options.bounds();
     const rect = dragRect(drag, { x: event.clientX, y: event.clientY }, bounds.width, bounds.height);
     cancel();
-    if (rect) options.select(rect);
+    if (moved) { if (rect) options.select(rect); }
+    else options.click(start);
   };
   const lost = (event) => { if (drag && drag.id === event.pointerId) cancel(); };
   const listeners = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: lost, lostpointercapture: lost };
   Object.entries(listeners).forEach(([name, handler]) => target.addEventListener(name, handler, true));
-  return { cancel, destroy() {
+  return { cancel, isDragging: () => !!drag?.moved, destroy() {
     cancel();
     Object.entries(listeners).forEach(([name, handler]) => target.removeEventListener(name, handler, true));
   } };

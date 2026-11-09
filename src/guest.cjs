@@ -14,7 +14,6 @@ const GUEST_INSTALL = `(function () {
   var clipRect = ${clipRect.toString()};
   var dragRect = ${dragRect.toString()};
   var installRegionPicker = ${installRegionPicker.toString()};
-  var mode = '__MODE__';
   var revision = 0;
   var instance = Math.random().toString(36).slice(2);
   var capturing = false;
@@ -98,7 +97,7 @@ const GUEST_INSTALL = `(function () {
   function reportScroll() {
     revision += 1;
     if (picker) picker.cancel();
-    if (mode === 'region') hide();
+    hide();
     if (frozen && frozenEl && frozenEl.isConnected) show(frozenEl);
     if (scrollFrame) return;
     scrollFrame = requestAnimationFrame(function () {
@@ -109,15 +108,14 @@ const GUEST_INSTALL = `(function () {
   window.addEventListener('scroll', reportScroll, true);
   window.addEventListener('resize', reportScroll, true);
   layer.addEventListener('mousemove', function (event) {
-    if (frozen || mode === 'region' || capturing) return;
+    if (frozen || capturing || picker.isDragging()) return;
     show(hit(event.clientX, event.clientY));
   });
   layer.addEventListener('mousedown', function (event) { event.preventDefault(); event.stopPropagation(); }, true);
-  layer.addEventListener('click', function (event) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (frozen || mode === 'region' || capturing) return;
-    var el = hit(event.clientX, event.clientY);
+  layer.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); }, true);
+  function pickElement(point) {
+    if (frozen || capturing) return;
+    var el = hit(point.x, point.y);
     if (!el) return;
     frozen = true;
     frozenEl = el;
@@ -126,12 +124,12 @@ const GUEST_INSTALL = `(function () {
     info.viewport = viewport();
     info.scroll = { x: window.scrollX, y: window.scrollY };
     try { console.log(MARK + JSON.stringify(info)); } catch (error) {}
-  }, true);
+  }
   picker = installRegionPicker(layer, {
-    enabled: function () { return mode === 'region'; },
     ignore: function () { return false; },
     blocked: function () { return frozen || capturing; },
     bounds: viewport,
+    click: pickElement,
     preview: function (rect) {
       hide();
       if (!rect) return;

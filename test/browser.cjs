@@ -84,10 +84,15 @@ async function saveAndSend(page, comment) {
       const failures = []; page.on('pageerror', (e) => failures.push(e.message));
       await page.setContent(html); await page.addScriptTag({ content: fixture });
       await page.getByRole('button', { name: 'Annotate', exact: true }).click();
-      await page.getByRole('button', { name: 'Region', exact: true }).click();
-      // Tiny click, Escape during drag, resize, scrolling and lost pointer capture must not open a card.
-      await drag(page, [100, 100], [101, 101]);
-      assert.equal(await page.locator('textarea').count(), 0);
+      assert.equal(await page.getByRole('button', { name: /^(Region|Element)$/ }).count(),0);
+      // Click/jitter keeps element picking; dragging changes automatically to a rectangle.
+      for (const end of [[100,100],[102,101]]) {
+        await drag(page,[100,100],end);
+        await page.locator('.dsh-annot-card__where').filter({hasText:'#target'}).waitFor();
+        await page.getByRole('button',{name:'Cancel',exact:true}).click();
+      }
+      await drag(page,[100,100],[102,140]);
+      assert.equal(await page.locator('textarea').count(),0);
       await page.mouse.move(100,100); await page.mouse.down(); await page.mouse.move(200,180);
       await page.keyboard.press('Escape'); await page.mouse.up();
       assert.equal(await page.locator('textarea').count(), 0);
@@ -103,6 +108,11 @@ async function saveAndSend(page, comment) {
         await page.mouse.up();
         assert.equal(await page.locator('textarea').count(), 0);
       }
+      // A forward drag also enters region selection without a mode change.
+      await drag(page,[100,100],[250,180]);
+      await page.locator('.dsh-annot-card__title').filter({hasText:'Selected region'}).waitFor();
+      await page.waitForFunction(() => !document.querySelector('.dsh-annot-card button:last-child').disabled);
+      await page.getByRole('button',{name:'Cancel',exact:true}).click();
       // Reverse selection, mixed items and PNG transmission.
       await drag(page, [280, 180], [80, 80]);
       await page.getByRole('button', { name: 'Add', exact: true }).waitFor({ state: 'visible' });
@@ -113,7 +123,6 @@ async function saveAndSend(page, comment) {
       await page.getByRole('button', { name: 'Edit annotation 1', exact: true }).click();
       await page.getByPlaceholder('What should change here?').fill('green region');
       await page.getByRole('button', { name: 'Add', exact: true }).click();
-      await page.getByRole('button', { name: 'Element', exact: true }).click();
       await page.mouse.click(300,220);
       const sent = await saveAndSend(page, 'element');
       assert.equal(sent.urls.length, 2); assert.deepEqual(sent.ids, ['file-0','file-1']);
@@ -158,10 +167,15 @@ async function saveAndSend(page, comment) {
     });
     await host.addScriptTag({ content: fixture });
     await host.getByRole('button', { name: 'Annotate', exact: true }).click();
-    await host.getByRole('button', { name: 'Region', exact: true }).click();
+    assert.equal(await host.getByRole('button', { name: /^(Region|Element)$/ }).count(),0);
     await guest.waitForFunction(() => !!window.__dshAnnotate);
     await guest.evaluate(() => scrollTo(0,300));
     await guest.waitForTimeout(100);
+    await guest.mouse.click(100,100);
+    await host.getByPlaceholder('What should change here?').waitFor();
+    assert.match(await host.locator('.dsh-annot-card__where').innerText(),/body/);
+    await host.getByRole('button',{name:'Cancel',exact:true}).click();
+    await guest.waitForFunction(()=>!!window.__dshAnnotate);
     await drag(guest, [400, 250], [100,100]);
     await host.getByPlaceholder('What should change here?').waitFor();
     await host.waitForFunction(() => !document.querySelector('.dsh-annot-card button:last-child').disabled);
@@ -174,7 +188,7 @@ async function saveAndSend(page, comment) {
     await uniform(host,sent.urls[0],[60,120,210,255]);
     fs.writeFileSync(path.join(output, 'guest.png'), Buffer.from(sent.urls[0].split(',')[1], 'base64'));
     // Overlay suppression is restored even when capturePage fails.
-    await guest.evaluate(GUEST_INSTALL.replace('__MODE__','region').replaceAll('__ACCENT__','#f00').replaceAll('__ON_ACCENT__','#fff'));
+    await guest.evaluate(GUEST_INSTALL.replaceAll('__ACCENT__','#f00').replaceAll('__ON_ACCENT__','#fff'));
     await host.addScriptTag({ content: captureBundle });
     const failure = await host.evaluate(async () => {
       const wv = document.querySelector('webview');

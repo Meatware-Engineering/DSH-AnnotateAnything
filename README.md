@@ -7,8 +7,8 @@ English and Russian UI are included. Licensed under MIT.
 ## What it does
 
 - Adds an **Annotate** button beside the conversation input.
-- Keeps the original **Element** mode and adds **Region**: hold the primary
-  pointer button, drag a rectangle in any direction, and release.
+- Highlights elements under the pointer. Click to annotate an element, or hold
+  the primary pointer button and drag to select a rectangle automatically.
 - Captures only the selected visible rectangle, with no annotation controls in the PNG.
 - Lets you add several comments, then edit or delete them via numbered pins.
 - Sends a numbered comment list and one cropped PNG per selection. Elements
@@ -62,16 +62,19 @@ Do not install both a linked copy and a GitHub copy under competing package name
 ## Use
 
 1. Open the conversation you want to send screenshots to.
-2. Click **Annotate**. Choose **Element** and click an element, or choose **Region**
-   and drag a visible rectangle. In Desktop Browser, start the drag inside the page.
+2. Click **Annotate**. Click a highlighted element, or hold the primary button
+   and drag a visible rectangle in any direction. There is no mode switch.
+   In Desktop Browser, start the gesture inside the page.
 3. Wait for the region screenshot, enter a comment and click **Add**. Repeat for
-   other elements or regions; both modes can be mixed in the same submission.
+   other elements or regions; both kinds can be mixed in the same submission.
 4. Click a numbered pin to edit/delete its comment.
 5. Click **Send** to submit the annotations to the current conversation.
 
 **Esc** cancels a drag first, then dismisses the current editor, or leaves
-annotation mode if neither is open. Selections smaller than 4 CSS pixels in either
-direction are ignored. Pointer cancellation, loss of capture, window blur, scroll
+annotation mode if neither is open. Movement below 4 CSS pixels counts as an
+element click. At 4 CSS pixels of movement, the gesture becomes a region selection.
+A region smaller than 4 CSS pixels in either dimension is discarded; a cancelled
+or too-thin drag never falls back to selecting an element. Pointer cancellation, loss of capture, window blur, scroll
 or resize cancels an unfinished drag. **Close** clears pending annotations.
 Finish or discard annotations before
 switching conversations. Opening annotation mode again after a guest navigation

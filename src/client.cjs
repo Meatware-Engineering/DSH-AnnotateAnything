@@ -19,7 +19,6 @@ const CSS = `
 .dsh-annot-bar__count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);font-weight:600}
 .dsh-annot-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-radius:7px;padding:4px 10px;font:12px/1.3 inherit;cursor:pointer;white-space:nowrap}
 .dsh-annot-btn:hover:enabled{background:var(--dsw-alias-bg-layer-2)}
-.dsh-annot-btn[aria-pressed=true]{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 .dsh-annot-btn:disabled{opacity:.5;cursor:default}
 .dsh-annot-btn--primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff)}
 .dsh-annot-btn--primary:hover:enabled{filter:brightness(1.06)}
@@ -101,7 +100,6 @@ function Overlay({ ctx, store, t }) {
   const [hover, setHover] = React.useState(null);
   const [items, setItems] = React.useState([]);
   const [draft, setDraftState] = React.useState(null);
-  const [mode, setMode] = React.useState('element');
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState('');
   const [, setTick] = React.useState(0);
@@ -273,7 +271,7 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     if (!isActive) return undefined;
     const onMove = (event) => {
-      if (mode === 'region' || draftRef.current || busyRef.current) return;
+      if (regionPickerRef.current?.isDragging() || draftRef.current || busyRef.current) return;
       if (event.target instanceof Element && event.target.closest(UI)) return;
       const el = pickAt(event.clientX, event.clientY);
       if (!el) {
@@ -291,12 +289,9 @@ function Overlay({ ctx, store, t }) {
       }
       setHover({ x: rect.left, y: rect.top, width: rect.width, height: rect.height, desc: describeElement(el) });
     };
-    const onClick = (event) => {
-      if (event.target instanceof Element && event.target.closest(UI)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (mode === 'region' || draftRef.current || busyRef.current) return;
-      const el = pickAt(event.clientX, event.clientY);
+    const pickElement = ({ x, y }) => {
+      if (draftRef.current || busyRef.current) return;
+      const el = pickAt(x, y);
       if (!el) return;
       if (String(el.tagName).toLowerCase() === 'webview') {
         setError(t('error.guestHint'));
@@ -333,11 +328,11 @@ function Overlay({ ctx, store, t }) {
       invalidate();
     };
     const picker = installRegionPicker(document, {
-      enabled: () => mode === 'region',
       ignore: (event) => event.target instanceof Element && !!event.target.closest(UI),
       blocked: () => !!draftRef.current || busyRef.current,
       bounds: () => ({ width: innerWidth, height: innerHeight }),
       preview: setHover,
+      click: pickElement,
       select: (rect) => {
         // Cross-process surfaces must be selected inside their own viewport.
         const overlapsGuest = Array.from(document.querySelectorAll('webview')).some((wv) => {
@@ -355,7 +350,7 @@ function Overlay({ ctx, store, t }) {
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('mousedown', stop, true);
     document.addEventListener('pointerdown', stop, true);
-    document.addEventListener('click', onClick, true);
+    document.addEventListener('click', stop, true);
     document.addEventListener('keydown', onKey, true);
     window.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', onScroll, true);
@@ -366,7 +361,7 @@ function Overlay({ ctx, store, t }) {
         const rect = wv.getBoundingClientRect();
         if (rect.width < 4 || rect.height < 4) continue;
         try {
-          const pending = wv.executeJavaScript(guestInstallScript(mode));
+          const pending = wv.executeJavaScript(guestInstallScript());
           if (pending && typeof pending.catch === 'function') pending.catch(() => {});
         } catch (_error) {
           /* guest annotation stays unavailable for this tab */
@@ -391,8 +386,7 @@ function Overlay({ ctx, store, t }) {
             const rect = clipRect(payload.rect, viewport.width, viewport.height, payload.kind === 'region' ? 4 : 2);
             if (!rect) return;
             scrollRef.current.set(wv, { x: viewport.x, y: viewport.y });
-            if (payload.kind === 'region') { if (mode === 'region') openRegion(rect, wv, viewport); return; }
-            if (mode !== 'element') return;
+            if (payload.kind === 'region') { openRegion(rect, wv, viewport); return; }
             openGuestPick(wv, {
               tag: clip(payload.tag, 40),
               label: clip(payload.label, 90),
@@ -434,13 +428,13 @@ function Overlay({ ctx, store, t }) {
       document.removeEventListener('mousemove', onMove, true);
       document.removeEventListener('mousedown', stop, true);
       document.removeEventListener('pointerdown', stop, true);
-      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('click', stop, true);
       document.removeEventListener('keydown', onKey, true);
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('resize', onScroll, true);
       uninstall();
     };
-  }, [isActive, mode, store, t]);
+  }, [isActive, store, t]);
 
   React.useEffect(() => {
     if (!isActive) { setDraft(null); setItems([]); setHover(null); }
@@ -509,11 +503,7 @@ function Overlay({ ctx, store, t }) {
     React.createElement(
       'div',
       { key: 'bar', 'data-annot-ui': 'bar', className: 'dsh-annot-bar' },
-      React.createElement('span', { className: 'dsh-annot-bar__hint' }, t(draft ? (draft.capturePending ? 'bar.capturing' : 'bar.hintDraft') : (mode === 'region' ? 'bar.regionHint' : 'bar.hint'))),
-      ...['element', 'region'].map((value) => React.createElement('button', {
-        key: value, type: 'button', className: 'dsh-annot-btn', 'aria-pressed': mode === value,
-        disabled: !!draft || busy, onClick: () => { setHover(null); setMode(value); },
-      }, t('mode.' + value))),
+      React.createElement('span', { className: 'dsh-annot-bar__hint' }, t(draft ? (draft.capturePending ? 'bar.capturing' : 'bar.hintDraft') : 'bar.hint')),
       React.createElement('span', { className: 'dsh-annot-bar__count' }, String(items.length)),
       ...items.flatMap((item, index) => item.kind === 'region' && item.epoch !== epochRef.current ? [
         React.createElement('button', { key: item.id, className: 'dsh-annot-btn', disabled: busy || !!draft,
@@ -617,12 +607,12 @@ function Overlay({ ctx, store, t }) {
 }
 
 /** The guest document cannot read Harness theme tokens, so the accent is passed in. */
-function guestInstallScript(mode) {
+function guestInstallScript() {
   const root = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (root.getPropertyValue(name) || '').trim() || fallback;
   const accent = read('--dsw-alias-button-primary-fill', read('--dsw-alias-brand-primary', '#3b82f6'));
   const onAccent = read('--dsw-alias-label-primary-foreground', '#fff');
-  return GUEST_INSTALL.replace('__MODE__', mode || 'element').split('__ACCENT__').join(accent).split('__ON_ACCENT__').join(onAccent);
+  return GUEST_INSTALL.split('__ACCENT__').join(accent).split('__ON_ACCENT__').join(onAccent);
 }
 
 function apply(ctx) {
@@ -662,11 +652,8 @@ function apply(ctx) {
 
 const DICT_EN = {
   'trigger.title': 'Annotate',
-  'bar.hint': 'Click an element to annotate it',
-  'mode.element': 'Element',
-  'mode.region': 'Region',
+  'bar.hint': 'Click an element or drag a region',
   'region.label': 'Selected region',
-  'bar.regionHint': 'Drag to select a visible region',
   'bar.capturing': 'Capturing…',
   'prompt.region': '   {surface} region (CSS px): x={x}, y={y}, width={width}, height={height}',
   'bar.hintDraft': 'Describe the annotation',
@@ -693,11 +680,8 @@ const DICT_EN = {
 
 const DICT_RU = {
   'trigger.title': 'Аннотировать',
-  'bar.hint': 'Нажмите на элемент, чтобы аннотировать его',
-  'mode.element': 'Элемент',
-  'mode.region': 'Область',
+  'bar.hint': 'Нажмите на элемент или выделите область перетаскиванием',
   'region.label': 'Выделенная область',
-  'bar.regionHint': 'Зажмите кнопку и выделите область',
   'bar.capturing': 'Снимок…',
   'prompt.region': '   Область {surface} (CSS px): x={x}, y={y}, ширина={width}, высота={height}',
   'bar.hintDraft': 'Опишите, что здесь не так',
