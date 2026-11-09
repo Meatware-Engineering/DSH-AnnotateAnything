@@ -19,23 +19,33 @@ are crops, not full-page images with pins painted over them.
 
 ## Install from GitHub
 
-Once this repository is published, npm publication is **not required**:
+npm publication is **not required**. For Desktop:
+
+1. Launch DeepSeek Harness Desktop once to initialize its profile.
+2. Use the `dsh` command installed by Desktop through **Manage dsh Command…**.
+   An npm-installed `dsh` cannot manage the Desktop profile. If needed, install
+   or repair the command, then open a new terminal.
+3. Let active tasks finish and fully quit Desktop before running the command below.
+   Closing its window is not enough.
 
 ```sh
 dsh plugin --profile desktop add github:Meatware-Engineering/DSH-AnnotateAnything
 ```
 
-For a separately managed Web profile, use `--profile web` instead. Desktop and Web
-profiles have separate plugin installations. If `dsh` is missing on macOS, use
-**DeepSeek Harness → Manage dsh Command… → Install** in the desktop app.
+Reopen Desktop, then open **Plugins** and enable AnnotateAnything if necessary.
+Follow Harness’s restart instructions if prompted.
 
-Open **Plugins** in the intended profile, enable the AnnotateAnything bundle if
-necessary, and reload/restart Harness if the client button does not appear.
+For a separately managed Web profile, use `--profile web` instead. Desktop and Web
+profiles have separate plugin installations.
+
+See the [official Desktop CLI instructions](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/desktop/README.md#bundled-command-runtime).
+
 The repository includes the generated `client.js`, so consumers do not need to
 build it. `private: true` prevents accidental npm publication; it does not make
 GitHub source private or prevent installation from GitHub.
 
-To work on a local checkout instead:
+To work on a local checkout instead (the same Desktop command, first-launch,
+full-quit, and reopen requirements apply):
 
 ```sh
 npm ci
