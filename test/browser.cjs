@@ -39,9 +39,10 @@ async function uniform(page, url, color) {
 async function drag(page, a, b) {
   await page.mouse.move(...a); await page.mouse.down(); await page.mouse.move(...b, { steps: 4 }); await page.mouse.up();
 }
-async function saveAndSend(page, comment) {
+async function saveAndSend(page, comment, beforeSend) {
   await page.getByPlaceholder('What should change here?').fill(comment);
   await page.getByRole('button', { name: 'Add', exact: true }).click();
+  if (beforeSend) await beforeSend();
   await page.getByRole('button', { name: /^Send/ }).click();
   await page.waitForFunction(() => !!window.sent);
   return page.evaluate(async () => {
@@ -225,7 +226,27 @@ async function saveAndSend(page, comment) {
     assert.deepEqual(scrolledOutline, { x: 750, y: 30, width: 150, height: 75 });
     await guest.evaluate(() => scrollTo(0, 300));
     await host.waitForTimeout(400);
-    const sent = await saveAndSend(host, 'guest region');
+    const guestMarker = () => guest.evaluate(() => {
+      const layer = document.querySelector('[data-dsh-annotate-markers]');
+      const outline = layer && [...layer.children].find((node) => node.tagName === 'DIV' && node.style.display === 'block');
+      if (!outline) return null;
+      const rect = outline.getBoundingClientRect();
+      return { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) };
+    });
+    const sent = await saveAndSend(host, 'guest region', async () => {
+      // The saved frame is drawn inside the page, so it cannot disagree with it.
+      await guest.waitForFunction(() => {
+        const layer = document.querySelector('[data-dsh-annotate-markers]');
+        return !!layer && [...layer.children].some((node) => node.tagName === 'DIV' && node.style.display === 'block');
+      });
+      const before = await guestMarker();
+      await guest.evaluate(() => scrollTo(0, 500));
+      await host.waitForTimeout(300);
+      const after = await guestMarker();
+      assert.equal(before.y - after.y, 200, 'guest-drawn frame follows the page');
+      await guest.evaluate(() => scrollTo(0, 300));
+      await host.waitForTimeout(300);
+    });
     assert.equal(sent.urls.length, 1); assert.match(sent.text, /browser region.*x=100, y=100, width=300, height=150/);
     assert.deepEqual(await pixels(host, sent.urls[0]), { width:600,height:300,pixel:[60,120,210,255] });
     await uniform(host,sent.urls[0],[60,120,210,255]);

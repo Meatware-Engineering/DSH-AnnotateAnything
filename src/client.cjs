@@ -249,6 +249,14 @@ function Overlay({ ctx, store, t }) {
     }
   };
 
+  const adoptList = (wv) => {
+    const list = [];
+    itemsRef.current.forEach((item, index) => {
+      if (item.wv === wv && item.guestId) list.push({ id: item.guestId, index: index + 1 });
+    });
+    return list;
+  };
+
   const signalGuests = (code) => {
     for (const pair of guestsRef.current) {
       try {
@@ -493,6 +501,11 @@ function Overlay({ ctx, store, t }) {
               setTick((value) => value + 1);
               return;
             }
+            if (payload && payload.kind === 'pin') {
+              const item = itemsRef.current.find((entry) => entry.guestId === payload.id);
+              if (item) openDraft(Object.assign({}, item, { editing: true }));
+              return;
+            }
             if (payload && payload.kind === 'move') {
               const id = typeof payload.id === 'string' ? payload.id : '';
               const rect = payload.rect;
@@ -560,7 +573,7 @@ function Overlay({ ctx, store, t }) {
         if (rect.width < 4 || rect.height < 4) continue;
         wv.__annotPolling = true;
         try {
-          const pending = wv.executeJavaScript('window.__dshAnnotate && window.__dshAnnotate.geometry ? window.__dshAnnotate.geometry() : null');
+          const pending = wv.executeJavaScript('window.__dshAnnotate && window.__dshAnnotate.adopt ? (window.__dshAnnotate.adopt(' + JSON.stringify(adoptList(wv)) + '), window.__dshAnnotate.geometry()) : null');
           Promise.resolve(pending)
             .then((list) => { if (Array.isArray(list) && list.length) applyGuestGeometry(wv, list); })
             .catch(() => {})
@@ -703,6 +716,9 @@ function Overlay({ ctx, store, t }) {
   }
 
   items.forEach((item, index) => {
+    // Once the guest reports live geometry it draws its own frame and pin; until
+    // then (for example after re-entering the mode) the host keeps showing them.
+    if (item.wv && item.liveRect) return;
     const rect = boxOf(itemRect(item));
     if (!rect) return;
     children.push(

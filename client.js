@@ -2709,6 +2709,56 @@ var require_guest = __commonJS({
     if (delta) return { x: Math.round(entry.region.x + delta.dx), y: Math.round(entry.region.y + delta.dy), width: width, height: height };
     return null;
   }
+  var adopted = [];
+  var markerLayer = null;
+  var markerNodes = new Map();
+  function elementNow(entry) {
+    if (!entry.el || !entry.el.isConnected) return null;
+    var bounds = entry.el.getBoundingClientRect();
+    return { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+  }
+  function markers() {
+    if (!markerLayer) {
+      markerLayer = document.createElement('div');
+      markerLayer.setAttribute('data-dsh-annotate', '1');
+      markerLayer.setAttribute('data-dsh-annotate-markers', '1');
+      markerLayer.style.cssText = 'position:fixed;inset:0;z-index:2147483645;pointer-events:none;overflow:hidden';
+      document.documentElement.appendChild(markerLayer);
+    }
+    return markerLayer;
+  }
+  function adopt(list) {
+    adopted = Array.isArray(list) ? list : [];
+    markers();
+    markerNodes.forEach(function (node, id) {
+      var keep = adopted.some(function (item) { return item.id === id; });
+      if (!keep) { try { node.outline.remove(); node.pin.remove(); } catch (error) {} markerNodes.delete(id); }
+    });
+    adopted.forEach(function (item) {
+      if (!item || typeof item.id !== 'string' || markerNodes.has(item.id)) return;
+      var outline = document.createElement('div');
+      outline.style.cssText = 'position:fixed;pointer-events:none;border:2px dashed __ACCENT__;border-radius:3px;box-sizing:border-box;opacity:.85;display:none';
+      var pin = document.createElement('button');
+      pin.type = 'button';
+      pin.textContent = String(item.index);
+      pin.style.cssText = 'position:fixed;pointer-events:auto;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:__ACCENT__;color:__ON_ACCENT__;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.28);display:none';
+      pin.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); emit({ kind: 'pin', id: item.id }); }, true);
+      markers().appendChild(outline);
+      markers().appendChild(pin);
+      markerNodes.set(item.id, { outline: outline, pin: pin });
+    });
+  }
+  function paintMarkers() {
+    if (!markerNodes.size) return;
+    markerNodes.forEach(function (node, id) {
+      var entry = null;
+      for (var i = 0; i < picks.length; i += 1) if (picks[i].id === id) { entry = picks[i]; break; }
+      var rect = entry ? (entry.region ? regionNow(entry) : elementNow(entry)) : null;
+      if (!rect) { node.outline.style.display = 'none'; node.pin.style.display = 'none'; return; }
+      Object.assign(node.outline.style, { display: 'block', left: rect.x + 'px', top: rect.y + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+      Object.assign(node.pin.style, { display: 'block', left: Math.max(0, rect.x - 11) + 'px', top: Math.max(0, rect.y - 11) + 'px' });
+    });
+  }
   function show(el) {
     if (!el) { box.style.display = 'none'; label.style.display = 'none'; return; }
     var rect = el.getBoundingClientRect();
@@ -2751,6 +2801,7 @@ var require_guest = __commonJS({
   function monitor() {
     monitorFrame = requestAnimationFrame(monitor);
     if (picks.length) reportMoves();
+    paintMarkers();
   }
   function reportScroll() {
     revision += 1;
@@ -2771,9 +2822,10 @@ var require_guest = __commonJS({
     if (event.target instanceof Element && event.target.closest('[data-dsh-annotate]')) return;
     show(hit(event.clientX, event.clientY));
   }
-  function onDown(event) { event.preventDefault(); event.stopImmediatePropagation(); }
-  function onClick(event) { event.preventDefault(); event.stopImmediatePropagation(); }
-  function onContext(event) { event.preventDefault(); }
+  function own(event) { return event.target instanceof Element && !!event.target.closest('[data-dsh-annotate]'); }
+  function onDown(event) { if (own(event)) return; event.preventDefault(); event.stopImmediatePropagation(); }
+  function onClick(event) { if (own(event)) return; event.preventDefault(); event.stopImmediatePropagation(); }
+  function onContext(event) { if (own(event)) return; event.preventDefault(); }
   document.addEventListener('mousemove', onHover, true);
   document.addEventListener('mousedown', onDown, true);
   document.addEventListener('click', onClick, true);
@@ -2854,6 +2906,7 @@ var require_guest = __commonJS({
       label.style.display = 'none';
     },
     scroll: reportScroll,
+    adopt: adopt,
     /** Current viewport rects of every tracked pick, for host-side polling. */
     geometry: function () {
       var out = [];
@@ -2879,7 +2932,10 @@ var require_guest = __commonJS({
       document.removeEventListener('click', onClick, true);
       document.removeEventListener('contextmenu', onContext, true);
       picks = [];
+      adopted = [];
+      markerNodes.clear();
       try { layer.remove(); box.remove(); label.remove(); cursorStyle.remove(); } catch (error) {}
+      try { if (markerLayer) markerLayer.remove(); } catch (error) {}
       window.removeEventListener('scroll', reportScroll, true);
       window.removeEventListener('resize', reportScroll, true);
       window.__dshAnnotate = null;
@@ -3136,6 +3192,13 @@ function Overlay({ ctx, store, t }) {
       }
     }
   };
+  const adoptList = (wv) => {
+    const list = [];
+    itemsRef.current.forEach((item, index) => {
+      if (item.wv === wv && item.guestId) list.push({ id: item.guestId, index: index + 1 });
+    });
+    return list;
+  };
   const signalGuests = (code) => {
     for (const pair of guestsRef.current) {
       try {
@@ -3389,6 +3452,11 @@ function Overlay({ ctx, store, t }) {
               setTick((value) => value + 1);
               return;
             }
+            if (payload && payload.kind === "pin") {
+              const item = itemsRef.current.find((entry) => entry.guestId === payload.id);
+              if (item) openDraft(Object.assign({}, item, { editing: true }));
+              return;
+            }
             if (payload && payload.kind === "move") {
               const id = typeof payload.id === "string" ? payload.id : "";
               const rect3 = payload.rect;
@@ -3454,7 +3522,7 @@ function Overlay({ ctx, store, t }) {
         if (rect.width < 4 || rect.height < 4) continue;
         wv.__annotPolling = true;
         try {
-          const pending = wv.executeJavaScript("window.__dshAnnotate && window.__dshAnnotate.geometry ? window.__dshAnnotate.geometry() : null");
+          const pending = wv.executeJavaScript("window.__dshAnnotate && window.__dshAnnotate.adopt ? (window.__dshAnnotate.adopt(" + JSON.stringify(adoptList(wv)) + "), window.__dshAnnotate.geometry()) : null");
           Promise.resolve(pending).then((list) => {
             if (Array.isArray(list) && list.length) applyGuestGeometry(wv, list);
           }).catch(() => {
@@ -3606,6 +3674,7 @@ function Overlay({ ctx, store, t }) {
     );
   }
   items.forEach((item, index) => {
+    if (item.wv && item.liveRect) return;
     const rect = boxOf(itemRect(item));
     if (!rect) return;
     children.push(
