@@ -18,6 +18,7 @@ const ctx = {
  get(name) {
    if (name === 'sessions') return { binding: () => ({ session: { id: 'test' } }) };
    if (name === 'conversation') return {
+     input: { shell: () => ({ snapshot: { draft: window.typedDraft || '' }, setDraft: (text) => { window.draftAfterSend = text; } }) },
      createDrafts(id, files) { window.attachments = files; return files.map((_, i) => ({ id: 'file-' + i })); },
      async sendSession(session, text, ids) { window.sent = { text, ids }; return { kind: 'success' }; }
    };

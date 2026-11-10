@@ -2666,6 +2666,34 @@ var require_guest = __commonJS({
     }
     return null;
   }
+  /** Scroll offsets of every scrollable ancestor: regions follow content without assuming an element moves. */
+  function scrollChain(el) {
+    var chain = [];
+    var root = document.scrollingElement || document.documentElement;
+    for (var node = el; node; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
+        chain.push({ el: node, top: node.scrollTop, left: node.scrollLeft });
+      }
+    }
+    var known = chain.some(function (entry) { return entry.el === root; });
+    if (!known) chain.push({ el: root, top: root.scrollTop, left: root.scrollLeft });
+    return chain;
+  }
+  function regionNow(entry) {
+    var chain = entry.chain || [];
+    var dx = 0; var dy = 0;
+    for (var i = 0; i < chain.length; i += 1) {
+      if (!chain[i].el.isConnected) { chain = null; break; }
+      dx -= chain[i].el.scrollLeft - chain[i].left;
+      dy -= chain[i].el.scrollTop - chain[i].top;
+    }
+    if (chain) return { x: Math.round(entry.region.x + dx), y: Math.round(entry.region.y + dy),
+      width: Math.round(entry.region.width), height: Math.round(entry.region.height) };
+    if (!entry.el || !entry.el.isConnected) return null;
+    var bounds = entry.el.getBoundingClientRect();
+    return { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
+      width: Math.round(entry.region.width), height: Math.round(entry.region.height) };
+  }
   function show(el) {
     if (!el) { box.style.display = 'none'; label.style.display = 'none'; return; }
     var rect = el.getBoundingClientRect();
@@ -2693,11 +2721,11 @@ var require_guest = __commonJS({
     picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
     for (var i = 0; i < picks.length; i += 1) {
       var entry = picks[i];
-      var bounds = entry.el.getBoundingClientRect();
+      var bounds = entry.region ? null : entry.el.getBoundingClientRect();
       var rect = entry.region
-        ? { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
-            width: Math.round(entry.region.width), height: Math.round(entry.region.height) }
+        ? regionNow(entry)
         : { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      if (!rect) continue;
       var last = picks[i].last;
       if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) continue;
       picks[i].last = rect;
@@ -2765,7 +2793,8 @@ var require_guest = __commonJS({
       var anchor = hit(rect.x + rect.width / 2, rect.y + rect.height / 2) || hit(rect.x + 2, rect.y + 2);
       if (anchor) {
         var bounds = anchor.getBoundingClientRect();
-        picks.push({ id: id, el: anchor, region: rect, offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
+        picks.push({ id: id, el: anchor, region: rect, chain: scrollChain(anchor),
+          offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
       }
       emit({ kind: 'region', id: id, rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
     }
@@ -2986,15 +3015,41 @@ function Overlay({ ctx, store, t }) {
     const sy = viewport && viewport.height > 0 ? outer.height / viewport.height : 1;
     return { x: outer.left + rect.x * sx, y: outer.top + rect.y * sy, width: rect.width * sx, height: rect.height * sy };
   };
+  const scrollChainOf = (el) => {
+    const chain = [];
+    const root = document.scrollingElement || document.documentElement;
+    for (let node = el; node; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
+        chain.push({ el: node, top: node.scrollTop, left: node.scrollLeft });
+      }
+    }
+    if (!chain.some((entry) => entry.el === root)) chain.push({ el: root, top: root.scrollTop, left: root.scrollLeft });
+    return chain;
+  };
   const regionRectOf = (value) => {
-    if (!value || value.kind !== "region") return null;
+    if (!value || value.kind !== "region" || !value.rect) return null;
+    const chain = value.scrollChain;
+    if (chain) {
+      let dx = 0;
+      let dy = 0;
+      let intact = true;
+      for (const entry of chain) {
+        if (!entry.el.isConnected) {
+          intact = false;
+          break;
+        }
+        dx -= entry.el.scrollLeft - entry.left;
+        dy -= entry.el.scrollTop - entry.top;
+      }
+      if (intact) return { x: value.rect.x + dx, y: value.rect.y + dy, width: value.rect.width, height: value.rect.height };
+    }
     const anchor = value.anchorEl;
     const offset = value.anchorOffset;
-    if (anchor && anchor.isConnected && offset && value.rect) {
+    if (anchor && anchor.isConnected && offset) {
       const bounds = anchor.getBoundingClientRect();
       return { x: bounds.left + offset.dx, y: bounds.top + offset.dy, width: value.rect.width, height: value.rect.height };
     }
-    return value.rect || null;
+    return value.rect;
   };
   const itemRect = (item) => {
     if (item.kind === "region" && !item.wv) return regionRectOf(item);
@@ -3060,6 +3115,7 @@ function Overlay({ ctx, store, t }) {
       liveRect: wv ? rect : null,
       anchorEl: anchorRect ? anchor : null,
       anchorOffset: anchorRect ? { dx: rect.x - anchorRect.left, dy: rect.y - anchorRect.top } : null,
+      scrollChain: anchorRect ? scrollChainOf(anchor) : null,
       guestViewport: viewport,
       comment: "",
       shot: null,
@@ -3363,13 +3419,27 @@ function Overlay({ ctx, store, t }) {
         const decoded = dataUrlToBytes(item.shot);
         files.push(new File([decoded.bytes], "annotation-" + (index + 1) + ".png", { type: decoded.mediaType }));
       });
-      const text = formatAnnotations(resolved, t);
+      let shell = null;
+      try {
+        shell = conversation.input && sessionId ? conversation.input.shell(sessionId) : null;
+      } catch (_error) {
+        shell = null;
+      }
+      const typed = shell && shell.snapshot ? String(shell.snapshot.draft || "").trim() : "";
+      const annotations = formatAnnotations(resolved, t);
+      const text = typed ? typed + "\n\n" + annotations : annotations;
       if (typeof conversation.createDrafts !== "function" || typeof conversation.sendSession !== "function") {
         throw new Error(t("error.unsupportedApi"));
       }
       const drafts = conversation.createDrafts(sessionId, files, false) || [];
       const result = await conversation.sendSession(session, text, drafts.map((entry) => entry.id), "queue");
       if (!result || result.kind !== "success") throw new Error(t("error.sendFailed"));
+      if (typed && shell) {
+        try {
+          shell.setDraft("");
+        } catch (_error) {
+        }
+      }
       setItems([]);
       store.set({ active: false });
     } catch (failure) {
@@ -3396,6 +3466,7 @@ function Overlay({ ctx, store, t }) {
           onClick: () => openDraft({ ...item, editing: true })
         }, String(index + 1))
       ] : []),
+      items.length > 0 ? React.createElement("button", { key: "clear", className: "dsh-annot-btn dsh-annot-btn--danger", onClick: () => setItems([]) }, t("bar.clear")) : null,
       React.createElement("button", { key: "send", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: items.length === 0 || busy || !!draft, onClick: send }, busy ? t("bar.sending") : t("bar.send", { count: items.length })),
       React.createElement("button", { key: "close", className: "dsh-annot-btn", onClick: () => {
         setDraft(null);
@@ -3535,6 +3606,7 @@ var DICT_EN = {
   "prompt.region": "   {surface} region (CSS px): x={x}, y={y}, width={width}, height={height}",
   "bar.hintDraft": "Describe the annotation",
   "bar.send": "Send {count}",
+  "bar.clear": "Clear",
   "bar.sending": "Sending\u2026",
   "bar.close": "Close",
   "card.placeholder": "What should change here?",
@@ -3571,6 +3643,7 @@ var DICT_RU = {
   "prompt.region": "   \u041E\u0431\u043B\u0430\u0441\u0442\u044C {surface} (CSS px): x={x}, y={y}, \u0448\u0438\u0440\u0438\u043D\u0430={width}, \u0432\u044B\u0441\u043E\u0442\u0430={height}",
   "bar.hintDraft": "\u041E\u043F\u0438\u0448\u0438\u0442\u0435, \u0447\u0442\u043E \u0437\u0434\u0435\u0441\u044C \u043D\u0435 \u0442\u0430\u043A",
   "bar.send": "\u041E\u0442\u043F\u0440\u0430\u0432\u0438\u0442\u044C ({count})",
+  "bar.clear": "\u041E\u0447\u0438\u0441\u0442\u0438\u0442\u044C",
   "bar.sending": "\u041E\u0442\u043F\u0440\u0430\u0432\u043A\u0430\u2026",
   "bar.close": "\u0417\u0430\u043A\u0440\u044B\u0442\u044C",
   "card.placeholder": "\u0427\u0442\u043E \u0437\u0434\u0435\u0441\u044C \u043F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C?",

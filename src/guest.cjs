@@ -73,6 +73,34 @@ const GUEST_INSTALL = `(function () {
     }
     return null;
   }
+  /** Scroll offsets of every scrollable ancestor: regions follow content without assuming an element moves. */
+  function scrollChain(el) {
+    var chain = [];
+    var root = document.scrollingElement || document.documentElement;
+    for (var node = el; node; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
+        chain.push({ el: node, top: node.scrollTop, left: node.scrollLeft });
+      }
+    }
+    var known = chain.some(function (entry) { return entry.el === root; });
+    if (!known) chain.push({ el: root, top: root.scrollTop, left: root.scrollLeft });
+    return chain;
+  }
+  function regionNow(entry) {
+    var chain = entry.chain || [];
+    var dx = 0; var dy = 0;
+    for (var i = 0; i < chain.length; i += 1) {
+      if (!chain[i].el.isConnected) { chain = null; break; }
+      dx -= chain[i].el.scrollLeft - chain[i].left;
+      dy -= chain[i].el.scrollTop - chain[i].top;
+    }
+    if (chain) return { x: Math.round(entry.region.x + dx), y: Math.round(entry.region.y + dy),
+      width: Math.round(entry.region.width), height: Math.round(entry.region.height) };
+    if (!entry.el || !entry.el.isConnected) return null;
+    var bounds = entry.el.getBoundingClientRect();
+    return { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
+      width: Math.round(entry.region.width), height: Math.round(entry.region.height) };
+  }
   function show(el) {
     if (!el) { box.style.display = 'none'; label.style.display = 'none'; return; }
     var rect = el.getBoundingClientRect();
@@ -100,11 +128,11 @@ const GUEST_INSTALL = `(function () {
     picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
     for (var i = 0; i < picks.length; i += 1) {
       var entry = picks[i];
-      var bounds = entry.el.getBoundingClientRect();
+      var bounds = entry.region ? null : entry.el.getBoundingClientRect();
       var rect = entry.region
-        ? { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
-            width: Math.round(entry.region.width), height: Math.round(entry.region.height) }
+        ? regionNow(entry)
         : { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      if (!rect) continue;
       var last = picks[i].last;
       if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) continue;
       picks[i].last = rect;
@@ -172,7 +200,8 @@ const GUEST_INSTALL = `(function () {
       var anchor = hit(rect.x + rect.width / 2, rect.y + rect.height / 2) || hit(rect.x + 2, rect.y + 2);
       if (anchor) {
         var bounds = anchor.getBoundingClientRect();
-        picks.push({ id: id, el: anchor, region: rect, offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
+        picks.push({ id: id, el: anchor, region: rect, chain: scrollChain(anchor),
+          offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
       }
       emit({ kind: 'region', id: id, rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
     }

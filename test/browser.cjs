@@ -94,8 +94,7 @@ async function saveAndSend(page, comment) {
       await page.getByRole('button', { name: 'Close', exact: true }).click();
       await page.locator('.dsh-annot-trigger__badge').waitFor();
       await page.getByRole('button', { name: 'Annotate', exact: true }).click();
-      await page.locator('.dsh-annot-pin').first().click();
-      await page.getByRole('button', { name: 'Delete', exact: true }).click();
+      await page.getByRole('button', { name: 'Clear', exact: true }).click();
       assert.equal(await page.locator('.dsh-annot-pin').count(), 0);
       // A forward drag also enters region selection without a mode change.
       await drag(page,[100,100],[250,180]);
@@ -113,7 +112,10 @@ async function saveAndSend(page, comment) {
       await page.getByPlaceholder('What should change here?').fill('green region');
       await page.getByRole('button', { name: 'Add', exact: true }).click();
       await page.mouse.click(300,220);
+      await page.evaluate(() => { window.typedDraft = 'typed note'; });
       const sent = await saveAndSend(page, 'element');
+      assert.match(sent.text, /^typed note\n\n/, 'typed composer text leads the message');
+      assert.equal(await page.evaluate(() => window.draftAfterSend), '', 'accepted send clears the composer draft');
       assert.equal(sent.urls.length, 2); assert.deepEqual(sent.ids, ['file-0','file-1']);
       assert.match(sent.text, /1\. Selected region — green region/); assert.match(sent.text, /x=80, y=80, width=200, height=100/);
       assert.match(sent.text, /2\..*element/);
@@ -133,6 +135,20 @@ async function saveAndSend(page, comment) {
       await page.waitForTimeout(150);
       const after = await page.locator('.dsh-annot-outline').last().boundingBox();
       assert.equal(Math.round(before.y - after.y), 120, 'region follows the scrolled content');
+      await page.locator('.dsh-annot-pin').last().click();
+      await page.getByRole('button', { name: 'Delete', exact: true }).click();
+      // Inner scroll containers anchor the same way.
+      await page.evaluate(() => { window.scrollTo(0, 0); document.getElementById('scroller').scrollTop = 0; });
+      await drag(page, [470, 100], [600, 240]);
+      await page.getByRole('button', { name: 'Add', exact: true }).waitFor({ state: 'visible' });
+      await page.waitForFunction(() => !document.querySelector('.dsh-annot-card button:last-child').disabled);
+      await page.getByPlaceholder('What should change here?').fill('inner region');
+      await page.getByRole('button', { name: 'Add', exact: true }).click();
+      const innerBefore = await page.locator('.dsh-annot-outline').last().boundingBox();
+      await page.evaluate(() => { document.getElementById('scroller').scrollTop = 100; });
+      await page.waitForTimeout(150);
+      const innerAfter = await page.locator('.dsh-annot-outline').last().boundingBox();
+      assert.equal(Math.round(innerBefore.y - innerAfter.y), 100, 'region follows an inner scroller');
       await page.locator('.dsh-annot-pin').last().click();
       await page.getByRole('button', { name: 'Delete', exact: true }).click();
       await page.getByRole('button', { name: 'Close', exact: true }).click();
@@ -200,6 +216,13 @@ async function saveAndSend(page, comment) {
     // Host outline scales guest CSS geometry by the guest surface's actual size.
     const outline = await host.locator('.dsh-annot-hover').first().boundingBox();
     assert.deepEqual(outline, { x: 750, y: 130, width: 150, height: 75 });
+    // A guest region follows the page while it scrolls (and the shot stays valid).
+    await guest.evaluate(() => scrollTo(0, 500));
+    await host.waitForTimeout(150);
+    const scrolledOutline = await host.locator('.dsh-annot-hover').first().boundingBox();
+    assert.deepEqual(scrolledOutline, { x: 750, y: 30, width: 150, height: 75 });
+    await guest.evaluate(() => scrollTo(0, 300));
+    await host.waitForTimeout(150);
     const sent = await saveAndSend(host, 'guest region');
     assert.equal(sent.urls.length, 1); assert.match(sent.text, /browser region.*x=100, y=100, width=300, height=150/);
     assert.deepEqual(await pixels(host, sent.urls[0]), { width:600,height:300,pixel:[60,120,210,255] });

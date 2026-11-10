@@ -162,16 +162,40 @@ function Overlay({ ctx, store, t }) {
     return { x: outer.left + rect.x * sx, y: outer.top + rect.y * sy, width: rect.width * sx, height: rect.height * sy };
   };
 
-  /** A host region keeps its offset to the element it was drawn over, so it scrolls with the content. */
+  const scrollChainOf = (el) => {
+    const chain = [];
+    const root = document.scrollingElement || document.documentElement;
+    for (let node = el; node; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
+        chain.push({ el: node, top: node.scrollTop, left: node.scrollLeft });
+      }
+    }
+    if (!chain.some((entry) => entry.el === root)) chain.push({ el: root, top: root.scrollTop, left: root.scrollLeft });
+    return chain;
+  };
+
+  /** A region follows the scroll offsets captured under it, whatever element it covers. */
   const regionRectOf = (value) => {
-    if (!value || value.kind !== 'region') return null;
+    if (!value || value.kind !== 'region' || !value.rect) return null;
+    const chain = value.scrollChain;
+    if (chain) {
+      let dx = 0;
+      let dy = 0;
+      let intact = true;
+      for (const entry of chain) {
+        if (!entry.el.isConnected) { intact = false; break; }
+        dx -= entry.el.scrollLeft - entry.left;
+        dy -= entry.el.scrollTop - entry.top;
+      }
+      if (intact) return { x: value.rect.x + dx, y: value.rect.y + dy, width: value.rect.width, height: value.rect.height };
+    }
     const anchor = value.anchorEl;
     const offset = value.anchorOffset;
-    if (anchor && anchor.isConnected && offset && value.rect) {
+    if (anchor && anchor.isConnected && offset) {
       const bounds = anchor.getBoundingClientRect();
       return { x: bounds.left + offset.dx, y: bounds.top + offset.dy, width: value.rect.width, height: value.rect.height };
     }
-    return value.rect || null;
+    return value.rect;
   };
 
   const itemRect = (item) => {
@@ -239,6 +263,7 @@ function Overlay({ ctx, store, t }) {
       liveRect: wv ? rect : null,
       anchorEl: anchorRect ? anchor : null,
       anchorOffset: anchorRect ? { dx: rect.x - anchorRect.left, dy: rect.y - anchorRect.top } : null,
+      scrollChain: anchorRect ? scrollChainOf(anchor) : null,
       guestViewport: viewport, comment: '', shot: null, capturePending: true,
       docRect: wv ? { ...rect, x: rect.x + viewport.x, y: rect.y + viewport.y } : null,
     };
@@ -544,13 +569,20 @@ function Overlay({ ctx, store, t }) {
         const decoded = dataUrlToBytes(item.shot);
         files.push(new File([decoded.bytes], 'annotation-' + (index + 1) + '.png', { type: decoded.mediaType }));
       });
-      const text = formatAnnotations(resolved, t);
+      // Typed composer text is part of the message; send it together and clear it
+      // only after the Host accepted the prompt.
+      let shell = null;
+      try { shell = conversation.input && sessionId ? conversation.input.shell(sessionId) : null; } catch (_error) { shell = null; }
+      const typed = shell && shell.snapshot ? String(shell.snapshot.draft || '').trim() : '';
+      const annotations = formatAnnotations(resolved, t);
+      const text = typed ? typed + '\n\n' + annotations : annotations;
       if (typeof conversation.createDrafts !== 'function' || typeof conversation.sendSession !== 'function') {
         throw new Error(t('error.unsupportedApi'));
       }
       const drafts = conversation.createDrafts(sessionId, files, false) || [];
       const result = await conversation.sendSession(session, text, drafts.map((entry) => entry.id), 'queue');
       if (!result || result.kind !== 'success') throw new Error(t('error.sendFailed'));
+      if (typed && shell) { try { shell.setDraft(''); } catch (_error) { /* the draft stays if the composer refuses */ } }
       setItems([]);
       store.set({ active: false });
     } catch (failure) {
@@ -574,6 +606,7 @@ function Overlay({ ctx, store, t }) {
           title: item.comment || t('pin.empty'), 'aria-label': t('pin.edit', { index: index + 1 }),
           onClick: () => openDraft({ ...item, editing: true }) }, String(index + 1)),
       ] : []),
+      items.length > 0 ? React.createElement('button', { key: 'clear', className: 'dsh-annot-btn dsh-annot-btn--danger', onClick: () => setItems([]) }, t('bar.clear')) : null,
       React.createElement('button', { key: 'send', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: items.length === 0 || busy || !!draft, onClick: send }, busy ? t('bar.sending') : t('bar.send', { count: items.length })),
       React.createElement('button', { key: 'close', className: 'dsh-annot-btn', onClick: () => { setDraft(null); store.set({ active: false }); } }, t('bar.close')),
     ),
@@ -723,6 +756,7 @@ const DICT_EN = {
   'prompt.region': '   {surface} region (CSS px): x={x}, y={y}, width={width}, height={height}',
   'bar.hintDraft': 'Describe the annotation',
   'bar.send': 'Send {count}',
+  'bar.clear': 'Clear',
   'bar.sending': 'Sending…',
   'bar.close': 'Close',
   'card.placeholder': 'What should change here?',
@@ -760,6 +794,7 @@ const DICT_RU = {
   'prompt.region': '   Область {surface} (CSS px): x={x}, y={y}, ширина={width}, высота={height}',
   'bar.hintDraft': 'Опишите, что здесь не так',
   'bar.send': 'Отправить ({count})',
+  'bar.clear': 'Очистить',
   'bar.sending': 'Отправка…',
   'bar.close': 'Закрыть',
   'card.placeholder': 'Что здесь поправить?',
