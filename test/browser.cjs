@@ -249,6 +249,19 @@ async function saveAndSend(page, comment) {
       return { scrolled: !!scrolled, resized: resized, exists:!!document.querySelector('[data-dsh-annotate]') };
     });
     assert.equal(state.scrolled,true); assert.equal(state.resized,null); assert.equal(state.exists,true);
+    // A Browser tab created after entering the mode still receives the picker.
+    await host.getByRole('button', { name: 'Annotate', exact: true }).click();
+    await host.evaluate(() => { document.querySelector('webview').remove(); });
+    await host.waitForTimeout(200);
+    await host.evaluate(() => {
+      const wv = document.createElement('webview');
+      wv.style.cssText = 'position:absolute;left:700px;top:80px;width:400px;height:300px';
+      wv.executeJavaScript = (code) => { window.execCount = (window.execCount || 0) + 1; return window.guestExec(code); };
+      wv.capturePage = async () => ({ toDataURL: () => 'data:image/png;base64,' });
+      document.body.appendChild(wv);
+    });
+    await host.waitForFunction(() => (window.execCount || 0) > 0);
+    await host.getByRole('button', { name: 'Close', exact: true }).click();
     await drag(guest,[100,100],[200,200]);
     await guest.waitForTimeout(100);
     await context.close();

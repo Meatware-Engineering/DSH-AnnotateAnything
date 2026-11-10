@@ -3336,11 +3336,36 @@ function Overlay({ ctx, store, t }) {
     document.addEventListener("keydown", onKey, true);
     window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onScroll, true);
+    let disposed = false;
     const guests = [];
+    const watched = /* @__PURE__ */ new WeakSet();
+    const detach = (wv) => {
+      const index = guests.findIndex((pair) => pair[0] === wv);
+      if (index === -1) return;
+      try {
+        guests[index][0].removeEventListener("console-message", guests[index][1]);
+      } catch (_error) {
+      }
+      try {
+        wv.removeEventListener("did-start-navigation", invalidate);
+      } catch (_error) {
+      }
+      guests.splice(index, 1);
+      guestsRef.current = guests;
+    };
     const install = () => {
+      if (disposed) return;
       for (const wv of Array.from(document.querySelectorAll("webview"))) {
+        if (guests.some((pair) => pair[0] === wv)) continue;
         const rect = wv.getBoundingClientRect();
         if (rect.width < 4 || rect.height < 4) continue;
+        if (!watched.has(wv)) {
+          watched.add(wv);
+          wv.addEventListener("did-stop-loading", () => {
+            detach(wv);
+            install();
+          });
+        }
         try {
           const pending = wv.executeJavaScript(guestInstallScript());
           if (pending && typeof pending.catch === "function") pending.catch(() => {
@@ -3405,6 +3430,7 @@ function Overlay({ ctx, store, t }) {
       guestsRef.current = guests;
     };
     const uninstall = () => {
+      disposed = true;
       for (const pair of guests) {
         try {
           pair[0].removeEventListener("console-message", pair[1]);
@@ -3420,6 +3446,7 @@ function Overlay({ ctx, store, t }) {
     };
     install();
     const poll = setInterval(() => {
+      install();
       for (const pair of guests) {
         const wv = pair[0];
         if (wv.__annotPolling) continue;
