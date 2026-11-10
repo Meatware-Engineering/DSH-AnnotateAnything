@@ -2727,26 +2727,43 @@ var require_guest = __commonJS({
     }
     return markerLayer;
   }
+  var pendingId = null;
+  function addMarker(id, index) {
+    markers();
+    if (markerNodes.has(id)) return;
+    var outline = document.createElement('div');
+    outline.style.cssText = 'position:fixed;pointer-events:none;border:2px dashed __ACCENT__;border-radius:3px;box-sizing:border-box;opacity:.85;display:none';
+    var pin = document.createElement('button');
+    pin.type = 'button';
+    pin.textContent = String(index);
+    pin.style.cssText = 'position:fixed;pointer-events:auto;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:__ACCENT__;color:__ON_ACCENT__;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.28);display:none';
+    pin.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); emit({ kind: 'pin', id: id }); }, true);
+    markers().appendChild(outline);
+    markers().appendChild(pin);
+    markerNodes.set(id, { outline: outline, pin: pin });
+    paintMarkers();
+  }
+  function dropMarker(id) {
+    var node = markerNodes.get(id);
+    if (!node) return;
+    try { node.outline.remove(); node.pin.remove(); } catch (error) {}
+    markerNodes.delete(id);
+  }
   function adopt(list) {
     adopted = Array.isArray(list) ? list : [];
     markers();
     markerNodes.forEach(function (node, id) {
-      var keep = adopted.some(function (item) { return item.id === id; });
-      if (!keep) { try { node.outline.remove(); node.pin.remove(); } catch (error) {} markerNodes.delete(id); }
+      var keep = adopted.some(function (item) { return item.id === id; }) || id === pendingId;
+      if (!keep) dropMarker(id);
     });
     adopted.forEach(function (item) {
-      if (!item || typeof item.id !== 'string' || markerNodes.has(item.id)) return;
-      var outline = document.createElement('div');
-      outline.style.cssText = 'position:fixed;pointer-events:none;border:2px dashed __ACCENT__;border-radius:3px;box-sizing:border-box;opacity:.85;display:none';
-      var pin = document.createElement('button');
-      pin.type = 'button';
-      pin.textContent = String(item.index);
-      pin.style.cssText = 'position:fixed;pointer-events:auto;width:22px;height:22px;padding:0;border:0;border-radius:11px;background:__ACCENT__;color:__ON_ACCENT__;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.28);display:none';
-      pin.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); emit({ kind: 'pin', id: item.id }); }, true);
-      markers().appendChild(outline);
-      markers().appendChild(pin);
-      markerNodes.set(item.id, { outline: outline, pin: pin });
+      if (!item || typeof item.id !== 'string') return;
+      addMarker(item.id, item.index);
+      var node = markerNodes.get(item.id);
+      if (node) node.pin.textContent = String(item.index);
     });
+    if (pendingId && adopted.some(function (item) { return item.id === pendingId; })) pendingId = null;
+    paintMarkers();
   }
   function paintMarkers() {
     if (!markerNodes.size) return;
@@ -2842,6 +2859,8 @@ var require_guest = __commonJS({
     frozenEl = el;
     var id = instance + ':' + String(++pickSeq);
     picks.push({ id: id, el: el });
+    pendingId = id;
+    addMarker(id, pickSeq);
     var info = describe(el);
     info.kind = 'pick';
     info.id = id;
@@ -2862,6 +2881,8 @@ var require_guest = __commonJS({
     select: function (rect) {
       frozen = true;
       var id = instance + ':r' + String(++pickSeq);
+      pendingId = id;
+      addMarker(id, pickSeq);
       var anchor = hit(rect.x + rect.width / 2, rect.y + rect.height / 2) || hit(rect.x + 2, rect.y + 2);
       if (anchor) {
         var bounds = anchor.getBoundingClientRect();
@@ -2890,6 +2911,8 @@ var require_guest = __commonJS({
       var now = viewport();
       if (expected && !['width', 'height', 'instance'].every(function (key) { return now[key] === expected[key]; })) return null;
       capturing = true; hide();
+      if (!markerLayer) markers();
+      markerLayer.style.visibility = 'hidden';
       await new Promise(function (resolve) { requestAnimationFrame(function () { requestAnimationFrame(resolve); }); });
       return window.__dshAnnotate && window.__dshAnnotate.captureValid(now) ? now : null;
     },
@@ -2897,16 +2920,22 @@ var require_guest = __commonJS({
       var now = viewport();
       return !!expected && ['width', 'height', 'instance'].every(function (key) { return now[key] === expected[key]; });
     },
-    finishCapture: function () { capturing = false; if (!frozen) hide(); },
+    finishCapture: function () {
+      capturing = false;
+      if (markerLayer) markerLayer.style.visibility = '';
+      if (!frozen) hide();
+    },
     resume: function () {
       frozen = false;
       picker.cancel();
+      frozenEl = null;
       frozenEl = null;
       box.style.display = 'none';
       label.style.display = 'none';
     },
     scroll: reportScroll,
     adopt: adopt,
+    forget: function (id) { if (typeof id === 'string') { dropMarker(id); if (pendingId === id) pendingId = null; } },
     /** Current viewport rects of every tracked pick, for host-side polling. */
     geometry: function () {
       var out = [];
@@ -3197,7 +3226,15 @@ function Overlay({ ctx, store, t }) {
     itemsRef.current.forEach((item, index) => {
       if (item.wv === wv && item.guestId) list.push({ id: item.guestId, index: index + 1 });
     });
+    const draft2 = draftRef.current;
+    if (draft2 && draft2.wv === wv && draft2.guestId && !list.some((entry) => entry.id === draft2.guestId)) {
+      list.push({ id: draft2.guestId, index: list.length + 1 });
+    }
     return list;
+  };
+  const forgetGuestDraft = (current) => {
+    if (!current || !current.guestId) return;
+    signalGuests("window.__dshAnnotate && window.__dshAnnotate.forget && window.__dshAnnotate.forget(" + JSON.stringify(current.guestId) + ")");
   };
   const signalGuests = (code) => {
     for (const pair of guestsRef.current) {
@@ -3299,6 +3336,7 @@ function Overlay({ ctx, store, t }) {
     setDraft(null);
   };
   const removeItem = (id) => {
+    forgetGuestDraft(draftRef.current);
     setItems((prev) => prev.filter((entry) => entry.id !== id));
     setDraft(null);
   };
@@ -3355,8 +3393,10 @@ function Overlay({ ctx, store, t }) {
       if (regionPickerRef.current?.cancel()) return;
       const current = draftRef.current;
       if (current) {
-        if (current.editing || current.capturePending) setDraft(null);
-        else saveDraft();
+        if (current.editing || current.capturePending) {
+          forgetGuestDraft(current);
+          setDraft(null);
+        } else saveDraft();
         return;
       }
       store.set({ active: false });
@@ -3723,7 +3763,10 @@ function Overlay({ ctx, store, t }) {
         React.createElement(
           "div",
           { className: "dsh-annot-card__rows" },
-          React.createElement("button", { key: "cancel", className: "dsh-annot-btn", onClick: () => setDraft(null) }, t("card.cancel")),
+          React.createElement("button", { key: "cancel", className: "dsh-annot-btn", onClick: () => {
+            forgetGuestDraft(draftRef.current);
+            setDraft(null);
+          } }, t("card.cancel")),
           draft.editing ? React.createElement("button", { key: "delete", className: "dsh-annot-btn dsh-annot-btn--danger", onClick: () => removeItem(draft.id) }, t("card.delete")) : null,
           React.createElement("button", { key: "save", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: !!draft.capturePending || draft.kind === "region" && !draft.shot, onClick: saveDraft }, t("card.save"))
         )

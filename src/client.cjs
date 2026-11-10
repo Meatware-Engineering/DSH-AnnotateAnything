@@ -254,7 +254,17 @@ function Overlay({ ctx, store, t }) {
     itemsRef.current.forEach((item, index) => {
       if (item.wv === wv && item.guestId) list.push({ id: item.guestId, index: index + 1 });
     });
+    const draft = draftRef.current;
+    if (draft && draft.wv === wv && draft.guestId && !list.some((entry) => entry.id === draft.guestId)) {
+      list.push({ id: draft.guestId, index: list.length + 1 });
+    }
     return list;
+  };
+
+  /** Cancel drops a provisional in-page marker; a saved annotation keeps it. */
+  const forgetGuestDraft = (current) => {
+    if (!current || !current.guestId) return;
+    signalGuests('window.__dshAnnotate && window.__dshAnnotate.forget && window.__dshAnnotate.forget(' + JSON.stringify(current.guestId) + ')');
   };
 
   const signalGuests = (code) => {
@@ -355,6 +365,7 @@ function Overlay({ ctx, store, t }) {
   };
 
   const removeItem = (id) => {
+    forgetGuestDraft(draftRef.current);
     setItems((prev) => prev.filter((entry) => entry.id !== id));
     setDraft(null);
   };
@@ -414,7 +425,7 @@ function Overlay({ ctx, store, t }) {
       if (current) {
         // Escape closes the card, never the collected annotations: a new draft is
         // kept (empty comment can be edited from its pin), an edit is discarded.
-        if (current.editing || current.capturePending) setDraft(null);
+        if (current.editing || current.capturePending) { forgetGuestDraft(current); setDraft(null); }
         else saveDraft();
         return;
       }
@@ -769,7 +780,7 @@ function Overlay({ ctx, store, t }) {
         React.createElement(
           'div',
           { className: 'dsh-annot-card__rows' },
-          React.createElement('button', { key: 'cancel', className: 'dsh-annot-btn', onClick: () => setDraft(null) }, t('card.cancel')),
+          React.createElement('button', { key: 'cancel', className: 'dsh-annot-btn', onClick: () => { forgetGuestDraft(draftRef.current); setDraft(null); } }, t('card.cancel')),
           draft.editing
             ? React.createElement('button', { key: 'delete', className: 'dsh-annot-btn dsh-annot-btn--danger', onClick: () => removeItem(draft.id) }, t('card.delete'))
             : null,
