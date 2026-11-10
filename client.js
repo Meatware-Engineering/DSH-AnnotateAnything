@@ -2679,20 +2679,35 @@ var require_guest = __commonJS({
     if (!known) chain.push({ el: root, top: root.scrollTop, left: root.scrollLeft });
     return chain;
   }
-  function regionNow(entry) {
+  function chainDelta(entry) {
     var chain = entry.chain || [];
     var dx = 0; var dy = 0;
     for (var i = 0; i < chain.length; i += 1) {
-      if (!chain[i].el.isConnected) { chain = null; break; }
+      if (!chain[i].el.isConnected) return null;
       dx -= chain[i].el.scrollLeft - chain[i].left;
       dy -= chain[i].el.scrollTop - chain[i].top;
     }
-    if (chain) return { x: Math.round(entry.region.x + dx), y: Math.round(entry.region.y + dy),
-      width: Math.round(entry.region.width), height: Math.round(entry.region.height) };
-    if (!entry.el || !entry.el.isConnected) return null;
-    var bounds = entry.el.getBoundingClientRect();
-    return { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
-      width: Math.round(entry.region.width), height: Math.round(entry.region.height) };
+    return { dx: dx, dy: dy };
+  }
+  function regionNow(entry) {
+    var width = Math.round(entry.region.width);
+    var height = Math.round(entry.region.height);
+    // Scroll offsets are stable even when the page recycles the element under
+    // the selection; element movement covers transform-based scrolling.
+    var delta = chainDelta(entry);
+    if (delta && (Math.abs(delta.dx) > 1 || Math.abs(delta.dy) > 1)) {
+      return { x: Math.round(entry.region.x + delta.dx), y: Math.round(entry.region.y + delta.dy), width: width, height: height };
+    }
+    if (entry.el && entry.el.isConnected && entry.base) {
+      var bounds = entry.el.getBoundingClientRect();
+      var movedX = bounds.left - entry.base.left;
+      var movedY = bounds.top - entry.base.top;
+      if (Math.abs(movedX) > 1 || Math.abs(movedY) > 1) {
+        return { x: Math.round(entry.region.x + movedX), y: Math.round(entry.region.y + movedY), width: width, height: height };
+      }
+    }
+    if (delta) return { x: Math.round(entry.region.x + delta.dx), y: Math.round(entry.region.y + delta.dy), width: width, height: height };
+    return null;
   }
   function show(el) {
     if (!el) { box.style.display = 'none'; label.style.display = 'none'; return; }
@@ -2718,7 +2733,7 @@ var require_guest = __commonJS({
   var pickSeq = 0;
   function reportMoves() {
     if (!picks.length) return;
-    picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
+    picks = picks.filter(function (entry) { return entry.region || (entry.el && entry.el.isConnected); });
     for (var i = 0; i < picks.length; i += 1) {
       var entry = picks[i];
       var bounds = entry.region ? null : entry.el.getBoundingClientRect();
@@ -2731,6 +2746,11 @@ var require_guest = __commonJS({
       picks[i].last = rect;
       emit({ kind: 'move', id: picks[i].id, rect: rect, viewport: viewport() });
     }
+  }
+  var monitorFrame = 0;
+  function monitor() {
+    monitorFrame = requestAnimationFrame(monitor);
+    if (picks.length) reportMoves();
   }
   function reportScroll() {
     revision += 1;
@@ -2794,6 +2814,7 @@ var require_guest = __commonJS({
       if (anchor) {
         var bounds = anchor.getBoundingClientRect();
         picks.push({ id: id, el: anchor, region: rect, chain: scrollChain(anchor),
+          base: { left: bounds.left, top: bounds.top },
           offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
       }
       emit({ kind: 'region', id: id, rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
@@ -2810,6 +2831,7 @@ var require_guest = __commonJS({
   document.documentElement.appendChild(box);
   document.documentElement.appendChild(label);
   document.documentElement.appendChild(layer);
+  monitorFrame = requestAnimationFrame(monitor);
   window.__dshAnnotate = {
     freeze: function () { frozen = true; picker.cancel(); },
     prepareCapture: async function (expected) {
@@ -2834,6 +2856,7 @@ var require_guest = __commonJS({
     scroll: reportScroll,
     destroy: function () {
       picker.destroy();
+      cancelAnimationFrame(monitorFrame);
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('blur', onBlur);
       document.removeEventListener('mousemove', onHover, true);
