@@ -2465,7 +2465,11 @@ var require_capture = __commonJS({
       const prepare = `window.__dshAnnotate && window.__dshAnnotate.prepareCapture(${JSON.stringify(expected || null)})`;
       try {
         const viewport = await wv.executeJavaScript(prepare);
-        const box = viewport && clipRect2(rect, viewport.width, viewport.height, 2);
+        if (!viewport) throw new CaptureError2("changed");
+        const dx = expected && Number.isFinite(expected.x) ? expected.x - viewport.x : 0;
+        const dy = expected && Number.isFinite(expected.y) ? expected.y - viewport.y : 0;
+        const moved = { x: rect.x + dx, y: rect.y + dy, width: rect.width, height: rect.height };
+        const box = clipRect2(moved, viewport.width, viewport.height, 2);
         if (!box) throw new CaptureError2("changed");
         if (box.width * box.height > MAX_SHOT_AREA) throw new CaptureError2("tooLarge");
         const image = await wv.capturePage();
@@ -2688,8 +2692,12 @@ var require_guest = __commonJS({
     if (!picks.length) return;
     picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
     for (var i = 0; i < picks.length; i += 1) {
-      var bounds = picks[i].el.getBoundingClientRect();
-      var rect = { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      var entry = picks[i];
+      var bounds = entry.el.getBoundingClientRect();
+      var rect = entry.region
+        ? { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
+            width: Math.round(entry.region.width), height: Math.round(entry.region.height) }
+        : { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
       var last = picks[i].last;
       if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) continue;
       picks[i].last = rect;
@@ -2753,7 +2761,13 @@ var require_guest = __commonJS({
     },
     select: function (rect) {
       frozen = true;
-      emit({ kind: 'region', rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
+      var id = instance + ':r' + String(++pickSeq);
+      var anchor = hit(rect.x + rect.width / 2, rect.y + rect.height / 2) || hit(rect.x + 2, rect.y + 2);
+      if (anchor) {
+        var bounds = anchor.getBoundingClientRect();
+        picks.push({ id: id, el: anchor, region: rect, offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
+      }
+      emit({ kind: 'region', id: id, rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
     }
   });
   function onKey(event) {
@@ -2771,14 +2785,14 @@ var require_guest = __commonJS({
     freeze: function () { frozen = true; picker.cancel(); },
     prepareCapture: async function (expected) {
       var now = viewport();
-      if (expected && !['width', 'height', 'x', 'y', 'revision', 'instance'].every(function (key) { return now[key] === expected[key]; })) return null;
+      if (expected && !['width', 'height', 'instance'].every(function (key) { return now[key] === expected[key]; })) return null;
       capturing = true; hide();
       await new Promise(function (resolve) { requestAnimationFrame(function () { requestAnimationFrame(resolve); }); });
       return window.__dshAnnotate && window.__dshAnnotate.captureValid(now) ? now : null;
     },
     captureValid: function (expected) {
       var now = viewport();
-      return !!expected && ['width', 'height', 'x', 'y', 'revision', 'instance'].every(function (key) { return now[key] === expected[key]; });
+      return !!expected && ['width', 'height', 'instance'].every(function (key) { return now[key] === expected[key]; });
     },
     finishCapture: function () { capturing = false; if (!frozen) hide(); },
     resume: function () {
@@ -2857,7 +2871,7 @@ var CSS2 = `
 .dsh-annot-card__input:focus{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:0}
 .dsh-annot-card__where{color:var(--dsw-alias-label-secondary);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-annot-card__rows{display:flex;gap:6px;justify-content:flex-end}
-.dsh-annot-error{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);pointer-events:auto;max-width:80vw;padding:6px 12px;border-radius:8px;background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-foreground,#fff);font:12px/1.4 system-ui,-apple-system,sans-serif}
+.dsh-annot-error{position:fixed;bottom:62px;left:50%;transform:translateX(-50%);pointer-events:none;max-width:80vw;padding:6px 12px;border-radius:8px;background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-foreground,#fff);font:12px/1.4 system-ui,-apple-system,sans-serif}
 `;
 var ICON = React.createElement(
   "svg",
@@ -2927,7 +2941,6 @@ function Overlay({ ctx, store, t }) {
   const itemsRef = React.useRef(items);
   const scrollRef = React.useRef(/* @__PURE__ */ new Map());
   const guestsRef = React.useRef([]);
-  const epochRef = React.useRef(0);
   const busyRef = React.useRef(busy);
   busyRef.current = busy;
   const regionPickerRef = React.useRef(null);
@@ -2940,6 +2953,11 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     store.set({ count: items.length });
   }, [items.length]);
+  React.useEffect(() => {
+    if (!error) return void 0;
+    const timer = setTimeout(() => setError(""), 8e3);
+    return () => clearTimeout(timer);
+  }, [error]);
   const isActive = state.active;
   const pickAt = (x, y) => {
     const list = document.elementsFromPoint(x, y);
@@ -2968,8 +2986,18 @@ function Overlay({ ctx, store, t }) {
     const sy = viewport && viewport.height > 0 ? outer.height / viewport.height : 1;
     return { x: outer.left + rect.x * sx, y: outer.top + rect.y * sy, width: rect.width * sx, height: rect.height * sy };
   };
+  const regionRectOf = (value) => {
+    if (!value || value.kind !== "region") return null;
+    const anchor = value.anchorEl;
+    const offset = value.anchorOffset;
+    if (anchor && anchor.isConnected && offset && value.rect) {
+      const bounds = anchor.getBoundingClientRect();
+      return { x: bounds.left + offset.dx, y: bounds.top + offset.dy, width: value.rect.width, height: value.rect.height };
+    }
+    return value.rect || null;
+  };
   const itemRect = (item) => {
-    if (item.kind === "region" && item.epoch !== epochRef.current) return null;
+    if (item.kind === "region" && !item.wv) return regionRectOf(item);
     if (item.wv && item.liveRect) return guestLiveRect(item.wv, item.liveRect, item.guestViewport);
     if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect, item.guestViewport);
     if (item.wv && item.guestRect) {
@@ -2984,7 +3012,7 @@ function Overlay({ ctx, store, t }) {
   };
   const draftRectOf = (value) => {
     if (!value) return null;
-    if (value.kind === "region" && value.epoch !== epochRef.current) return null;
+    if (value.kind === "region" && !value.wv) return regionRectOf(value);
     if (value.wv && value.liveRect) return guestLiveRect(value.wv, value.liveRect, value.guestViewport);
     if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect, value.guestViewport);
     if (value.el && value.el.isConnected) {
@@ -3017,16 +3045,21 @@ function Overlay({ ctx, store, t }) {
     setError("");
     setDraft(payload);
   };
-  const openRegion = (rect, wv, viewport) => {
+  const openRegion = (rect, wv, viewport, guestId) => {
     if (draftRef.current || busyRef.current) return;
+    const anchor = wv ? null : pickAt(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
     const current = {
       id: "a" + Math.random().toString(36).slice(2),
       kind: "region",
-      epoch: epochRef.current,
       desc: { label: t("region.label"), rect, surface: wv ? "browser" : "harness" },
       rect: wv ? null : rect,
       wv: wv || null,
       guestRect: wv ? rect : null,
+      guestId: guestId || null,
+      liveRect: wv ? rect : null,
+      anchorEl: anchorRect ? anchor : null,
+      anchorOffset: anchorRect ? { dx: rect.x - anchorRect.left, dy: rect.y - anchorRect.top } : null,
       guestViewport: viewport,
       comment: "",
       shot: null,
@@ -3038,7 +3071,7 @@ function Overlay({ ctx, store, t }) {
     const pending = wv ? captureGuest(wv, rect, viewport) : captureHostRegion(rect);
     pending.then((shot) => {
       if (draftRef.current?.id !== current.id || !store.get().active) return;
-      if (current.epoch !== epochRef.current || !shot) throw new CaptureError("changed");
+      if (!shot) throw new CaptureError("changed");
       setDraft({ ...draftRef.current, shot, capturePending: false });
     }).catch((failure) => {
       if (draftRef.current?.id !== current.id) return;
@@ -3150,7 +3183,6 @@ function Overlay({ ctx, store, t }) {
       store.set({ active: false });
     };
     const invalidate = () => {
-      epochRef.current += 1;
       regionPickerRef.current?.cancel();
       if (draftRef.current?.capturePending) setDraft(null);
       setHover(null);
@@ -3235,7 +3267,7 @@ function Overlay({ ctx, store, t }) {
             if (!rect2) return;
             scrollRef.current.set(wv, { x: viewport.x, y: viewport.y });
             if (payload.kind === "region") {
-              openRegion(rect2, wv, viewport);
+              openRegion(rect2, wv, viewport, payload.id);
               return;
             }
             openGuestPick(wv, {
@@ -3354,7 +3386,7 @@ function Overlay({ ctx, store, t }) {
       { key: "bar", "data-annot-ui": "bar", className: "dsh-annot-bar" },
       React.createElement("span", { className: "dsh-annot-bar__hint" }, t(draft ? draft.capturePending ? "bar.capturing" : "bar.hintDraft" : "bar.hint")),
       React.createElement("span", { className: "dsh-annot-bar__count" }, String(items.length)),
-      ...items.flatMap((item, index) => item.kind === "region" && item.epoch !== epochRef.current ? [
+      ...items.flatMap((item, index) => item.kind === "region" && boxOf(itemRect(item)) === null ? [
         React.createElement("button", {
           key: item.id,
           className: "dsh-annot-btn",

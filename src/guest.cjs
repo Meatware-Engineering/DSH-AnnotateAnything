@@ -99,8 +99,12 @@ const GUEST_INSTALL = `(function () {
     if (!picks.length) return;
     picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
     for (var i = 0; i < picks.length; i += 1) {
-      var bounds = picks[i].el.getBoundingClientRect();
-      var rect = { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      var entry = picks[i];
+      var bounds = entry.el.getBoundingClientRect();
+      var rect = entry.region
+        ? { x: Math.round(bounds.left + entry.offset.dx), y: Math.round(bounds.top + entry.offset.dy),
+            width: Math.round(entry.region.width), height: Math.round(entry.region.height) }
+        : { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
       var last = picks[i].last;
       if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) continue;
       picks[i].last = rect;
@@ -164,7 +168,13 @@ const GUEST_INSTALL = `(function () {
     },
     select: function (rect) {
       frozen = true;
-      emit({ kind: 'region', rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
+      var id = instance + ':r' + String(++pickSeq);
+      var anchor = hit(rect.x + rect.width / 2, rect.y + rect.height / 2) || hit(rect.x + 2, rect.y + 2);
+      if (anchor) {
+        var bounds = anchor.getBoundingClientRect();
+        picks.push({ id: id, el: anchor, region: rect, offset: { dx: rect.x - bounds.left, dy: rect.y - bounds.top } });
+      }
+      emit({ kind: 'region', id: id, rect: rect, viewport: viewport(), scroll: { x: scrollX, y: scrollY } });
     }
   });
   function onKey(event) {
@@ -182,14 +192,14 @@ const GUEST_INSTALL = `(function () {
     freeze: function () { frozen = true; picker.cancel(); },
     prepareCapture: async function (expected) {
       var now = viewport();
-      if (expected && !['width', 'height', 'x', 'y', 'revision', 'instance'].every(function (key) { return now[key] === expected[key]; })) return null;
+      if (expected && !['width', 'height', 'instance'].every(function (key) { return now[key] === expected[key]; })) return null;
       capturing = true; hide();
       await new Promise(function (resolve) { requestAnimationFrame(function () { requestAnimationFrame(resolve); }); });
       return window.__dshAnnotate && window.__dshAnnotate.captureValid(now) ? now : null;
     },
     captureValid: function (expected) {
       var now = viewport();
-      return !!expected && ['width', 'height', 'x', 'y', 'revision', 'instance'].every(function (key) { return now[key] === expected[key]; });
+      return !!expected && ['width', 'height', 'instance'].every(function (key) { return now[key] === expected[key]; });
     },
     finishCapture: function () { capturing = false; if (!frozen) hide(); },
     resume: function () {

@@ -109,7 +109,7 @@ async function saveAndSend(page, comment) {
       await page.getByPlaceholder('What should change here?').fill('green region');
       await page.getByRole('button', { name: 'Add', exact: true }).click();
       await page.evaluate(() => window.dispatchEvent(new Event('scroll')));
-      await page.getByRole('button', { name: 'Edit annotation 1', exact: true }).click();
+      await page.locator('.dsh-annot-pin').first().click();
       await page.getByPlaceholder('What should change here?').fill('green region');
       await page.getByRole('button', { name: 'Add', exact: true }).click();
       await page.mouse.click(300,220);
@@ -120,6 +120,23 @@ async function saveAndSend(page, comment) {
       assert.deepEqual(await pixels(page, sent.urls[0]), { width: 200, height: 100, pixel: [15,170,90,255] });
       await uniform(page,sent.urls[0],[15,170,90,255]);
       fs.writeFileSync(path.join(output, 'host-dpr-' + dpr + '.png'), Buffer.from(sent.urls[0].split(',')[1], 'base64'));
+      // A region stays anchored to the content it was drawn over while scrolling.
+      await page.evaluate(() => { document.body.style.height = '2000px'; window.scrollTo(0, 0); });
+      await page.getByRole('button', { name: 'Annotate', exact: true }).click();
+      await drag(page, [100, 100], [200, 180]);
+      await page.getByRole('button', { name: 'Add', exact: true }).waitFor({ state: 'visible' });
+      await page.waitForFunction(() => !document.querySelector('.dsh-annot-card button:last-child').disabled);
+      await page.getByPlaceholder('What should change here?').fill('anchored region');
+      await page.getByRole('button', { name: 'Add', exact: true }).click();
+      const before = await page.locator('.dsh-annot-outline').last().boundingBox();
+      await page.evaluate(() => window.scrollTo(0, 120));
+      await page.waitForTimeout(150);
+      const after = await page.locator('.dsh-annot-outline').last().boundingBox();
+      assert.equal(Math.round(before.y - after.y), 120, 'region follows the scrolled content');
+      await page.locator('.dsh-annot-pin').last().click();
+      await page.getByRole('button', { name: 'Delete', exact: true }).click();
+      await page.getByRole('button', { name: 'Close', exact: true }).click();
+      await page.evaluate(() => window.scrollTo(0, 0));
       // Test the production DOM capture against a nested scroller and root scrolling.
       await page.addScriptTag({ content: captureBundle });
       await page.evaluate(() => { document.getElementById('scroller').scrollTop = 100; });
@@ -201,9 +218,12 @@ async function saveAndSend(page, comment) {
       const api=window.__dshAnnotate;
       const first=await api.prepareCapture(null); api.finishCapture();
       scrollTo(0,400); await new Promise(requestAnimationFrame);
-      return { stale:await api.prepareCapture(first), exists:!!document.querySelector('[data-dsh-annotate]') };
+      // Scrolling during capture keeps the shot valid; only a changed frame does not.
+      const scrolled = await api.prepareCapture(first); api.finishCapture();
+      const resized = await api.prepareCapture({ ...first, width: first.width - 10 }); api.finishCapture();
+      return { scrolled: !!scrolled, resized: resized, exists:!!document.querySelector('[data-dsh-annotate]') };
     });
-    assert.equal(state.stale,null); assert.equal(state.exists,true);
+    assert.equal(state.scrolled,true); assert.equal(state.resized,null); assert.equal(state.exists,true);
     await drag(guest,[100,100],[200,200]);
     await guest.waitForTimeout(100);
     await context.close();

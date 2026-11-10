@@ -34,7 +34,7 @@ const CSS = `
 .dsh-annot-card__input:focus{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:0}
 .dsh-annot-card__where{color:var(--dsw-alias-label-secondary);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-annot-card__rows{display:flex;gap:6px;justify-content:flex-end}
-.dsh-annot-error{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);pointer-events:auto;max-width:80vw;padding:6px 12px;border-radius:8px;background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-foreground,#fff);font:12px/1.4 system-ui,-apple-system,sans-serif}
+.dsh-annot-error{position:fixed;bottom:62px;left:50%;transform:translateX(-50%);pointer-events:none;max-width:80vw;padding:6px 12px;border-radius:8px;background:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-label-primary-foreground,#fff);font:12px/1.4 system-ui,-apple-system,sans-serif}
 `;
 
 const ICON = React.createElement(
@@ -110,7 +110,6 @@ function Overlay({ ctx, store, t }) {
   const itemsRef = React.useRef(items);
   const scrollRef = React.useRef(new Map());
   const guestsRef = React.useRef([]);
-  const epochRef = React.useRef(0);
   const busyRef = React.useRef(busy);
   busyRef.current = busy;
   const regionPickerRef = React.useRef(null);
@@ -121,6 +120,12 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     store.set({ count: items.length });
   }, [items.length]);
+
+  React.useEffect(() => {
+    if (!error) return undefined;
+    const timer = setTimeout(() => setError(''), 8000);
+    return () => clearTimeout(timer);
+  }, [error]);
 
   const isActive = state.active;
 
@@ -157,8 +162,20 @@ function Overlay({ ctx, store, t }) {
     return { x: outer.left + rect.x * sx, y: outer.top + rect.y * sy, width: rect.width * sx, height: rect.height * sy };
   };
 
+  /** A host region keeps its offset to the element it was drawn over, so it scrolls with the content. */
+  const regionRectOf = (value) => {
+    if (!value || value.kind !== 'region') return null;
+    const anchor = value.anchorEl;
+    const offset = value.anchorOffset;
+    if (anchor && anchor.isConnected && offset && value.rect) {
+      const bounds = anchor.getBoundingClientRect();
+      return { x: bounds.left + offset.dx, y: bounds.top + offset.dy, width: value.rect.width, height: value.rect.height };
+    }
+    return value.rect || null;
+  };
+
   const itemRect = (item) => {
-    if (item.kind === 'region' && item.epoch !== epochRef.current) return null;
+    if (item.kind === 'region' && !item.wv) return regionRectOf(item);
     if (item.wv && item.liveRect) return guestLiveRect(item.wv, item.liveRect, item.guestViewport);
     if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect, item.guestViewport);
     if (item.wv && item.guestRect) {
@@ -174,7 +191,7 @@ function Overlay({ ctx, store, t }) {
 
   const draftRectOf = (value) => {
     if (!value) return null;
-    if (value.kind === 'region' && value.epoch !== epochRef.current) return null;
+    if (value.kind === 'region' && !value.wv) return regionRectOf(value);
     if (value.wv && value.liveRect) return guestLiveRect(value.wv, value.liveRect, value.guestViewport);
     if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect, value.guestViewport);
     if (value.el && value.el.isConnected) {
@@ -211,12 +228,17 @@ function Overlay({ ctx, store, t }) {
     setDraft(payload);
   };
 
-  const openRegion = (rect, wv, viewport) => {
+  const openRegion = (rect, wv, viewport, guestId) => {
     if (draftRef.current || busyRef.current) return;
+    const anchor = wv ? null : pickAt(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
     const current = {
-      id: 'a' + Math.random().toString(36).slice(2), kind: 'region', epoch: epochRef.current,
+      id: 'a' + Math.random().toString(36).slice(2), kind: 'region',
       desc: { label: t('region.label'), rect: rect, surface: wv ? 'browser' : 'harness' },
-      rect: wv ? null : rect, wv: wv || null, guestRect: wv ? rect : null,
+      rect: wv ? null : rect, wv: wv || null, guestRect: wv ? rect : null, guestId: guestId || null,
+      liveRect: wv ? rect : null,
+      anchorEl: anchorRect ? anchor : null,
+      anchorOffset: anchorRect ? { dx: rect.x - anchorRect.left, dy: rect.y - anchorRect.top } : null,
       guestViewport: viewport, comment: '', shot: null, capturePending: true,
       docRect: wv ? { ...rect, x: rect.x + viewport.x, y: rect.y + viewport.y } : null,
     };
@@ -225,7 +247,7 @@ function Overlay({ ctx, store, t }) {
     const pending = wv ? captureGuest(wv, rect, viewport) : captureHostRegion(rect);
     pending.then((shot) => {
       if (draftRef.current?.id !== current.id || !store.get().active) return;
-      if (current.epoch !== epochRef.current || !shot) throw new CaptureError('changed');
+      if (!shot) throw new CaptureError('changed');
       setDraft({ ...draftRef.current, shot, capturePending: false });
     }).catch((failure) => {
       if (draftRef.current?.id !== current.id) return;
@@ -342,7 +364,6 @@ function Overlay({ ctx, store, t }) {
       store.set({ active: false });
     };
     const invalidate = () => {
-      epochRef.current += 1;
       regionPickerRef.current?.cancel();
       if (draftRef.current?.capturePending) setDraft(null);
       setHover(null);
@@ -425,7 +446,7 @@ function Overlay({ ctx, store, t }) {
             const rect = clipRect(payload.rect, viewport.width, viewport.height, payload.kind === 'region' ? 4 : 2);
             if (!rect) return;
             scrollRef.current.set(wv, { x: viewport.x, y: viewport.y });
-            if (payload.kind === 'region') { openRegion(rect, wv, viewport); return; }
+            if (payload.kind === 'region') { openRegion(rect, wv, viewport, payload.id); return; }
             openGuestPick(wv, {
               tag: clip(payload.tag, 40),
               label: clip(payload.label, 90),
@@ -548,7 +569,7 @@ function Overlay({ ctx, store, t }) {
       { key: 'bar', 'data-annot-ui': 'bar', className: 'dsh-annot-bar' },
       React.createElement('span', { className: 'dsh-annot-bar__hint' }, t(draft ? (draft.capturePending ? 'bar.capturing' : 'bar.hintDraft') : 'bar.hint')),
       React.createElement('span', { className: 'dsh-annot-bar__count' }, String(items.length)),
-      ...items.flatMap((item, index) => item.kind === 'region' && item.epoch !== epochRef.current ? [
+      ...items.flatMap((item, index) => item.kind === 'region' && boxOf(itemRect(item)) === null ? [
         React.createElement('button', { key: item.id, className: 'dsh-annot-btn', disabled: busy || !!draft,
           title: item.comment || t('pin.empty'), 'aria-label': t('pin.edit', { index: index + 1 }),
           onClick: () => openDraft({ ...item, editing: true }) }, String(index + 1)),

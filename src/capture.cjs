@@ -166,7 +166,13 @@ async function captureGuest(wv, rect, expected) {
   const prepare = `window.__dshAnnotate && window.__dshAnnotate.prepareCapture(${JSON.stringify(expected || null)})`;
   try {
     const viewport = await wv.executeJavaScript(prepare);
-    const box = viewport && clipRect(rect, viewport.width, viewport.height, 2);
+    if (!viewport) throw new CaptureError('changed');
+    // A page that scrolled while the shot was prepared still holds the selected
+    // content: shift the crop by the scroll delta instead of failing the shot.
+    const dx = expected && Number.isFinite(expected.x) ? expected.x - viewport.x : 0;
+    const dy = expected && Number.isFinite(expected.y) ? expected.y - viewport.y : 0;
+    const moved = { x: rect.x + dx, y: rect.y + dy, width: rect.width, height: rect.height };
+    const box = clipRect(moved, viewport.width, viewport.height, 2);
     if (!box) throw new CaptureError('changed');
     if (box.width * box.height > MAX_SHOT_AREA) throw new CaptureError('tooLarge');
     // capturePage rectangle units vary with guest zoom; crop the actual raster
