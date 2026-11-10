@@ -261,6 +261,21 @@ const GUEST_INSTALL = `(function () {
       label.style.display = 'none';
     },
     scroll: reportScroll,
+    /** Current viewport rects of every tracked pick, for host-side polling. */
+    geometry: function () {
+      var out = [];
+      for (var i = 0; i < picks.length; i += 1) {
+        var entry = picks[i];
+        var rect;
+        if (entry.region) rect = regionNow(entry);
+        else if (entry.el && entry.el.isConnected) {
+          var bounds = entry.el.getBoundingClientRect();
+          rect = { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+        }
+        if (rect) out.push({ id: entry.id, rect: rect });
+      }
+      return out;
+    },
     destroy: function () {
       picker.destroy();
       cancelAnimationFrame(monitorFrame);

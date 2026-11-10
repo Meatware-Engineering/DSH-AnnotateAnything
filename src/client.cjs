@@ -225,6 +225,30 @@ function Overlay({ ctx, store, t }) {
     return value.rect || null;
   };
 
+  /** Pull guest geometry so frames follow the page even when messages are lost. */
+  const applyGuestGeometry = (wv, list) => {
+    const byId = new Map(list.map((entry) => [entry.id, entry.rect]));
+    setItems((prev) => {
+      let changed = false;
+      const next = prev.map((entry) => {
+        if (entry.wv !== wv || !entry.guestId) return entry;
+        const rect = byId.get(entry.guestId);
+        const current = entry.liveRect;
+        if (!rect || (current && current.x === rect.x && current.y === rect.y && current.width === rect.width && current.height === rect.height)) return entry;
+        changed = true;
+        return Object.assign({}, entry, { liveRect: rect });
+      });
+      return changed ? next : prev;
+    });
+    const draft = draftRef.current;
+    if (draft && draft.wv === wv && draft.guestId) {
+      const rect = byId.get(draft.guestId);
+      if (rect && (!draft.liveRect || draft.liveRect.x !== rect.x || draft.liveRect.y !== rect.y || draft.liveRect.width !== rect.width || draft.liveRect.height !== rect.height)) {
+        setDraft(Object.assign({}, draft, { liveRect: rect }));
+      }
+    }
+  };
+
   const signalGuests = (code) => {
     for (const pair of guestsRef.current) {
       try {
@@ -506,7 +530,28 @@ function Overlay({ ctx, store, t }) {
       guestsRef.current = [];
     };
     install();
+    // The guest pushes moves, but the host also pulls geometry: message delivery
+    // and animation frames are not guaranteed inside a sandboxed webview.
+    const poll = setInterval(() => {
+      for (const pair of guests) {
+        const wv = pair[0];
+        if (wv.__annotPolling) continue;
+        const rect = wv.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+        wv.__annotPolling = true;
+        try {
+          const pending = wv.executeJavaScript('window.__dshAnnotate && window.__dshAnnotate.geometry ? window.__dshAnnotate.geometry() : null');
+          Promise.resolve(pending)
+            .then((list) => { if (Array.isArray(list) && list.length) applyGuestGeometry(wv, list); })
+            .catch(() => {})
+            .finally(() => { wv.__annotPolling = false; });
+        } catch (_error) {
+          wv.__annotPolling = false;
+        }
+      }
+    }, 120);
     return () => {
+      clearInterval(poll);
       picker.destroy();
       regionPickerRef.current = null;
       window.removeEventListener('blur', onBlur);

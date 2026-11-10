@@ -178,6 +178,8 @@ async function saveAndSend(page, comment) {
     await host.exposeFunction('guestExec', (code) => guest.evaluate(code));
     await host.exposeFunction('guestCapture', async () => (await guest.screenshot()).toString('base64'));
     guest.on('console', (message) => {
+      // Drop push moves: the host must still follow the page by polling geometry.
+      if (message.text().includes('"kind":"move"')) return;
       if (message.text().startsWith('__DSH_ANNOTATE__')) host.evaluate((text) => {
         const e = new Event('console-message'); e.message = text; document.querySelector('webview').dispatchEvent(e);
       }, message.text()).catch(() => {});
@@ -218,11 +220,11 @@ async function saveAndSend(page, comment) {
     assert.deepEqual(outline, { x: 750, y: 130, width: 150, height: 75 });
     // A guest region follows the page while it scrolls (and the shot stays valid).
     await guest.evaluate(() => scrollTo(0, 500));
-    await host.waitForTimeout(150);
+    await host.waitForTimeout(400);
     const scrolledOutline = await host.locator('.dsh-annot-hover').first().boundingBox();
     assert.deepEqual(scrolledOutline, { x: 750, y: 30, width: 150, height: 75 });
     await guest.evaluate(() => scrollTo(0, 300));
-    await host.waitForTimeout(150);
+    await host.waitForTimeout(400);
     const sent = await saveAndSend(host, 'guest region');
     assert.equal(sent.urls.length, 1); assert.match(sent.text, /browser region.*x=100, y=100, width=300, height=150/);
     assert.deepEqual(await pixels(host, sent.urls[0]), { width:600,height:300,pixel:[60,120,210,255] });

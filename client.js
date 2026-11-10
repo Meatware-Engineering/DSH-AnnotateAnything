@@ -2854,6 +2854,21 @@ var require_guest = __commonJS({
       label.style.display = 'none';
     },
     scroll: reportScroll,
+    /** Current viewport rects of every tracked pick, for host-side polling. */
+    geometry: function () {
+      var out = [];
+      for (var i = 0; i < picks.length; i += 1) {
+        var entry = picks[i];
+        var rect;
+        if (entry.region) rect = regionNow(entry);
+        else if (entry.el && entry.el.isConnected) {
+          var bounds = entry.el.getBoundingClientRect();
+          rect = { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+        }
+        if (rect) out.push({ id: entry.id, rect: rect });
+      }
+      return out;
+    },
     destroy: function () {
       picker.destroy();
       cancelAnimationFrame(monitorFrame);
@@ -3098,6 +3113,28 @@ function Overlay({ ctx, store, t }) {
       return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
     }
     return value.rect || null;
+  };
+  const applyGuestGeometry = (wv, list) => {
+    const byId = new Map(list.map((entry) => [entry.id, entry.rect]));
+    setItems((prev) => {
+      let changed = false;
+      const next = prev.map((entry) => {
+        if (entry.wv !== wv || !entry.guestId) return entry;
+        const rect = byId.get(entry.guestId);
+        const current = entry.liveRect;
+        if (!rect || current && current.x === rect.x && current.y === rect.y && current.width === rect.width && current.height === rect.height) return entry;
+        changed = true;
+        return Object.assign({}, entry, { liveRect: rect });
+      });
+      return changed ? next : prev;
+    });
+    const draft2 = draftRef.current;
+    if (draft2 && draft2.wv === wv && draft2.guestId) {
+      const rect = byId.get(draft2.guestId);
+      if (rect && (!draft2.liveRect || draft2.liveRect.x !== rect.x || draft2.liveRect.y !== rect.y || draft2.liveRect.width !== rect.width || draft2.liveRect.height !== rect.height)) {
+        setDraft(Object.assign({}, draft2, { liveRect: rect }));
+      }
+    }
   };
   const signalGuests = (code) => {
     for (const pair of guestsRef.current) {
@@ -3382,7 +3419,28 @@ function Overlay({ ctx, store, t }) {
       guestsRef.current = [];
     };
     install();
+    const poll = setInterval(() => {
+      for (const pair of guests) {
+        const wv = pair[0];
+        if (wv.__annotPolling) continue;
+        const rect = wv.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+        wv.__annotPolling = true;
+        try {
+          const pending = wv.executeJavaScript("window.__dshAnnotate && window.__dshAnnotate.geometry ? window.__dshAnnotate.geometry() : null");
+          Promise.resolve(pending).then((list) => {
+            if (Array.isArray(list) && list.length) applyGuestGeometry(wv, list);
+          }).catch(() => {
+          }).finally(() => {
+            wv.__annotPolling = false;
+          });
+        } catch (_error) {
+          wv.__annotPolling = false;
+        }
+      }
+    }, 120);
     return () => {
+      clearInterval(poll);
       picker.destroy();
       regionPickerRef.current = null;
       window.removeEventListener("blur", onBlur);
