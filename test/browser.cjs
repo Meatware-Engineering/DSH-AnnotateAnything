@@ -85,6 +85,18 @@ async function saveAndSend(page, comment) {
         await page.mouse.up();
         assert.equal(await page.locator('textarea').count(), 0);
       }
+      // Escape keeps the annotation it was collecting; Close keeps collected ones too.
+      await page.mouse.click(100, 100);
+      await page.getByPlaceholder('What should change here?').waitFor();
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('textarea').count(), 0);
+      await page.locator('.dsh-annot-pin').first().waitFor();
+      await page.getByRole('button', { name: 'Close', exact: true }).click();
+      await page.locator('.dsh-annot-trigger__badge').waitFor();
+      await page.getByRole('button', { name: 'Annotate', exact: true }).click();
+      await page.locator('.dsh-annot-pin').first().click();
+      await page.getByRole('button', { name: 'Delete', exact: true }).click();
+      assert.equal(await page.locator('.dsh-annot-pin').count(), 0);
       // A forward drag also enters region selection without a mode change.
       await drag(page,[100,100],[250,180]);
       await page.locator('.dsh-annot-card__title').filter({hasText:'Selected region'}).waitFor();
@@ -146,6 +158,18 @@ async function saveAndSend(page, comment) {
     await host.getByRole('button', { name: 'Annotate', exact: true }).click();
     assert.equal(await host.getByRole('button', { name: /^(Region|Element)$/ }).count(),0);
     await guest.waitForFunction(() => !!window.__dshAnnotate);
+    // The annotation layer must not eat wheel scrolling of an inner scroller.
+    await guest.evaluate(() => {
+      const box = document.createElement('div');
+      box.id = 'inner';
+      box.style.cssText = 'position:fixed;left:500px;top:20px;width:200px;height:200px;overflow:auto;background:#fff';
+      box.innerHTML = '<div style="height:900px;background:#eee"></div>';
+      document.body.appendChild(box);
+    });
+    await guest.mouse.move(600, 120);
+    await guest.mouse.wheel(0, 300);
+    await guest.waitForTimeout(200);
+    assert.ok(await guest.evaluate(() => document.getElementById('inner').scrollTop > 0), 'wheel must scroll the inner container');
     await guest.evaluate(() => scrollTo(0,300));
     await guest.waitForTimeout(100);
     await guest.mouse.click(100,100);

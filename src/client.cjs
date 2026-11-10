@@ -10,7 +10,8 @@ const NS = 'annotateAnything';
 const UI = '[data-annot-ui]';
 
 const CSS = `
-.dsh-annot-trigger{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
+.dsh-annot-trigger{position:relative;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
+.dsh-annot-trigger__badge{position:absolute;top:-2px;right:-3px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);font:600 9px/13px system-ui,sans-serif;text-align:center}
 .dsh-annot-trigger:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
 .dsh-annot-trigger--active{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent);color:var(--dsw-alias-brand-primary)}
 .dsh-annot-layer{position:fixed;inset:0;z-index:9000;pointer-events:none}
@@ -50,7 +51,7 @@ const ICON = React.createElement(
 );
 
 function createStore() {
-  let state = { active: false, sessionId: undefined };
+  let state = { active: false, sessionId: undefined, count: 0 };
   const listeners = new Set();
   return {
     get: () => state,
@@ -86,12 +87,13 @@ function Trigger({ props, store, t }) {
       type: 'button',
       'data-annot-ui': 'trigger',
       className: 'dsh-annot-trigger' + (state.active ? ' dsh-annot-trigger--active' : ''),
-      title: t('trigger.title'),
+      title: state.count > 0 ? t('trigger.titleCount', { count: state.count }) : t('trigger.title'),
       'aria-label': t('trigger.title'),
       'aria-pressed': state.active,
       onClick: () => store.set({ active: !state.active }),
     },
     ICON,
+    state.count > 0 && !state.active ? React.createElement('span', { className: 'dsh-annot-trigger__badge' }, String(state.count)) : null,
   );
 }
 
@@ -115,6 +117,10 @@ function Overlay({ ctx, store, t }) {
   const setDraft = (value) => { draftRef.current = value; setDraftState(value); };
   draftRef.current = draft;
   itemsRef.current = items;
+
+  React.useEffect(() => {
+    store.set({ count: items.length });
+  }, [items.length]);
 
   const isActive = state.active;
 
@@ -143,8 +149,17 @@ function Overlay({ ctx, store, t }) {
     };
   };
 
+  /** Guest viewport coordinates reported live by the guest (inner scrollers included). */
+  const guestLiveRect = (wv, rect, viewport) => {
+    const outer = wv.getBoundingClientRect();
+    const sx = viewport && viewport.width > 0 ? outer.width / viewport.width : 1;
+    const sy = viewport && viewport.height > 0 ? outer.height / viewport.height : 1;
+    return { x: outer.left + rect.x * sx, y: outer.top + rect.y * sy, width: rect.width * sx, height: rect.height * sy };
+  };
+
   const itemRect = (item) => {
     if (item.kind === 'region' && item.epoch !== epochRef.current) return null;
+    if (item.wv && item.liveRect) return guestLiveRect(item.wv, item.liveRect, item.guestViewport);
     if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect, item.guestViewport);
     if (item.wv && item.guestRect) {
       const outer = item.wv.getBoundingClientRect();
@@ -160,6 +175,7 @@ function Overlay({ ctx, store, t }) {
   const draftRectOf = (value) => {
     if (!value) return null;
     if (value.kind === 'region' && value.epoch !== epochRef.current) return null;
+    if (value.wv && value.liveRect) return guestLiveRect(value.wv, value.liveRect, value.guestViewport);
     if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect, value.guestViewport);
     if (value.el && value.el.isConnected) {
       const rect = value.el.getBoundingClientRect();
@@ -233,6 +249,8 @@ function Overlay({ ctx, store, t }) {
       desc: { tag: payload.tag, label: payload.label, text: payload.text, selector: payload.selector, rect: payload.rect },
       el: null,
       wv: wv,
+      guestId: payload.id,
+      liveRect: payload.rect,
       guestRect: payload.rect,
       guestViewport: payload.viewport,
       docRect: docRect,
@@ -313,8 +331,15 @@ function Overlay({ ctx, store, t }) {
       if (event.key !== 'Escape') return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (regionPickerRef.current?.cancel()) return;
-      if (draftRef.current) setDraft(null);
-      else store.set({ active: false });
+      const current = draftRef.current;
+      if (current) {
+        // Escape closes the card, never the collected annotations: a new draft is
+        // kept (empty comment can be edited from its pin), an edit is discarded.
+        if (current.editing || current.capturePending) setDraft(null);
+        else saveDraft();
+        return;
+      }
+      store.set({ active: false });
     };
     const invalidate = () => {
       epochRef.current += 1;
@@ -380,6 +405,20 @@ function Overlay({ ctx, store, t }) {
               setTick((value) => value + 1);
               return;
             }
+            if (payload && payload.kind === 'move') {
+              const id = typeof payload.id === 'string' ? payload.id : '';
+              const rect = payload.rect;
+              const viewport = payload.viewport;
+              if (!id || !rect || !viewport) return;
+              const next = { id: id, rect: rect, viewport: viewport };
+              setItems((prev) => (prev.some((entry) => entry.guestId === id)
+                ? prev.map((entry) => (entry.guestId === id ? Object.assign({}, entry, { liveRect: next.rect, guestViewport: next.viewport }) : entry))
+                : prev));
+              if (draftRef.current && draftRef.current.guestId === id) {
+                setDraft(Object.assign({}, draftRef.current, { liveRect: next.rect, guestViewport: next.viewport }));
+              }
+              return;
+            }
             if (!payload || !['pick', 'region'].includes(payload.kind)) return;
             const viewport = payload.viewport;
             if (!viewport || typeof viewport.instance !== 'string' || !['width', 'height', 'x', 'y', 'revision'].every((key) => Number.isFinite(viewport[key]))) return;
@@ -437,7 +476,8 @@ function Overlay({ ctx, store, t }) {
   }, [isActive, store, t]);
 
   React.useEffect(() => {
-    if (!isActive) { setDraft(null); setItems([]); setHover(null); }
+    // Leaving the mode hides its card but keeps the annotations already collected.
+    if (!isActive) { setDraft(null); setHover(null); }
   }, [isActive]);
 
   // Freeze the guest highlight while a comment card is open so the marked
@@ -514,11 +554,11 @@ function Overlay({ ctx, store, t }) {
           onClick: () => openDraft({ ...item, editing: true }) }, String(index + 1)),
       ] : []),
       React.createElement('button', { key: 'send', className: 'dsh-annot-btn dsh-annot-btn--primary', disabled: items.length === 0 || busy || !!draft, onClick: send }, busy ? t('bar.sending') : t('bar.send', { count: items.length })),
-      React.createElement('button', { key: 'close', className: 'dsh-annot-btn', onClick: () => { setItems([]); setDraft(null); store.set({ active: false }); } }, t('bar.close')),
+      React.createElement('button', { key: 'close', className: 'dsh-annot-btn', onClick: () => { setDraft(null); store.set({ active: false }); } }, t('bar.close')),
     ),
   );
 
-  const frozen = draft ? boxOf(draftRectOf(draft)) : null;
+  const frozen = draft && !(draft.wv && draft.kind !== 'region') ? boxOf(draftRectOf(draft)) : null;
   if (draft && frozen) {
     const label = clip((draft.desc && (draft.desc.label || draft.desc.tag)) || '', 60);
     children.push(React.createElement('div', { key: 'frozen', className: 'dsh-annot-hover', style: { left: frozen.x, top: frozen.y, width: frozen.width, height: frozen.height } }));
@@ -655,6 +695,7 @@ function apply(ctx) {
 
 const DICT_EN = {
   'trigger.title': 'Annotate',
+  'trigger.titleCount': 'Annotate — {count} kept',
   'bar.hint': 'Click an element or drag a region',
   'region.label': 'Selected region',
   'bar.capturing': 'Capturing…',
@@ -691,6 +732,7 @@ const DICT_EN = {
 
 const DICT_RU = {
   'trigger.title': 'Аннотировать',
+  'trigger.titleCount': 'Аннотировать — сохранено {count}',
   'bar.hint': 'Нажмите на элемент или выделите область перетаскиванием',
   'region.label': 'Выделенная область',
   'bar.capturing': 'Снимок…',

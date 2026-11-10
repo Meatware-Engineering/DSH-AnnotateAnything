@@ -24,7 +24,7 @@ const GUEST_INSTALL = `(function () {
   var LABEL = 'position:fixed;pointer-events:none;background:__ACCENT__;color:__ON_ACCENT__;font:11px/1.5 -apple-system,system-ui,sans-serif;padding:1px 6px;border-radius:3px;z-index:2147483647;display:none;white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis';
   var layer = document.createElement('div');
   layer.setAttribute('data-dsh-annotate', '1');
-  layer.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent';
+  layer.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:transparent;pointer-events:none';
   var box = document.createElement('div');
   box.style.cssText = HIT;
   var label = document.createElement('div');
@@ -93,6 +93,20 @@ const GUEST_INSTALL = `(function () {
   var frozenEl = null;
   var scrollFrame = 0;
   var picker;
+  var picks = [];
+  var pickSeq = 0;
+  function reportMoves() {
+    if (!picks.length) return;
+    picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
+    for (var i = 0; i < picks.length; i += 1) {
+      var bounds = picks[i].el.getBoundingClientRect();
+      var rect = { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      var last = picks[i].last;
+      if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) continue;
+      picks[i].last = rect;
+      emit({ kind: 'move', id: picks[i].id, rect: rect, viewport: viewport() });
+    }
+  }
   function reportScroll() {
     revision += 1;
     if (picker) picker.cancel();
@@ -102,29 +116,43 @@ const GUEST_INSTALL = `(function () {
     scrollFrame = requestAnimationFrame(function () {
       scrollFrame = 0;
       try { console.log(MARK + JSON.stringify({ kind: 'scroll', x: window.scrollX, y: window.scrollY, revision: revision })); } catch (error) {}
+      reportMoves();
     });
   }
   window.addEventListener('scroll', reportScroll, true);
   window.addEventListener('resize', reportScroll, true);
-  layer.addEventListener('mousemove', function (event) {
+  function onHover(event) {
     if (frozen || capturing || picker.isDragging()) return;
+    if (event.target instanceof Element && event.target.closest('[data-dsh-annotate]')) return;
     show(hit(event.clientX, event.clientY));
-  });
-  layer.addEventListener('mousedown', function (event) { event.preventDefault(); event.stopPropagation(); }, true);
-  layer.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); }, true);
+  }
+  function onDown(event) { event.preventDefault(); event.stopImmediatePropagation(); }
+  function onClick(event) { event.preventDefault(); event.stopImmediatePropagation(); }
+  function onContext(event) { event.preventDefault(); }
+  document.addEventListener('mousemove', onHover, true);
+  document.addEventListener('mousedown', onDown, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('contextmenu', onContext, true);
+  var cursorStyle = document.createElement('style');
+  cursorStyle.setAttribute('data-dsh-annotate', '1');
+  cursorStyle.textContent = 'html,html *{cursor:crosshair !important}';
+  document.documentElement.appendChild(cursorStyle);
   function pickElement(point) {
     if (frozen || capturing) return;
     var el = hit(point.x, point.y);
     if (!el) return;
     frozen = true;
     frozenEl = el;
+    var id = instance + ':' + String(++pickSeq);
+    picks.push({ id: id, el: el });
     var info = describe(el);
     info.kind = 'pick';
+    info.id = id;
     info.viewport = viewport();
     info.scroll = { x: window.scrollX, y: window.scrollY };
     try { console.log(MARK + JSON.stringify(info)); } catch (error) {}
   }
-  picker = installRegionPicker(layer, {
+  picker = installRegionPicker(document, {
     ignore: function () { return false; },
     blocked: function () { return frozen || capturing; },
     bounds: viewport,
@@ -176,7 +204,12 @@ const GUEST_INSTALL = `(function () {
       picker.destroy();
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('blur', onBlur);
-      try { layer.remove(); box.remove(); label.remove(); } catch (error) {}
+      document.removeEventListener('mousemove', onHover, true);
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('contextmenu', onContext, true);
+      picks = [];
+      try { layer.remove(); box.remove(); label.remove(); cursorStyle.remove(); } catch (error) {}
       window.removeEventListener('scroll', reportScroll, true);
       window.removeEventListener('resize', reportScroll, true);
       window.__dshAnnotate = null;

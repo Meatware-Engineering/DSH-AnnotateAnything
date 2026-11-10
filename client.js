@@ -2613,7 +2613,7 @@ var require_guest = __commonJS({
   var LABEL = 'position:fixed;pointer-events:none;background:__ACCENT__;color:__ON_ACCENT__;font:11px/1.5 -apple-system,system-ui,sans-serif;padding:1px 6px;border-radius:3px;z-index:2147483647;display:none;white-space:nowrap;max-width:60vw;overflow:hidden;text-overflow:ellipsis';
   var layer = document.createElement('div');
   layer.setAttribute('data-dsh-annotate', '1');
-  layer.style.cssText = 'position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:transparent';
+  layer.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:transparent;pointer-events:none';
   var box = document.createElement('div');
   box.style.cssText = HIT;
   var label = document.createElement('div');
@@ -2682,6 +2682,20 @@ var require_guest = __commonJS({
   var frozenEl = null;
   var scrollFrame = 0;
   var picker;
+  var picks = [];
+  var pickSeq = 0;
+  function reportMoves() {
+    if (!picks.length) return;
+    picks = picks.filter(function (entry) { return entry.el && entry.el.isConnected; });
+    for (var i = 0; i < picks.length; i += 1) {
+      var bounds = picks[i].el.getBoundingClientRect();
+      var rect = { x: Math.round(bounds.left), y: Math.round(bounds.top), width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      var last = picks[i].last;
+      if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) continue;
+      picks[i].last = rect;
+      emit({ kind: 'move', id: picks[i].id, rect: rect, viewport: viewport() });
+    }
+  }
   function reportScroll() {
     revision += 1;
     if (picker) picker.cancel();
@@ -2691,29 +2705,43 @@ var require_guest = __commonJS({
     scrollFrame = requestAnimationFrame(function () {
       scrollFrame = 0;
       try { console.log(MARK + JSON.stringify({ kind: 'scroll', x: window.scrollX, y: window.scrollY, revision: revision })); } catch (error) {}
+      reportMoves();
     });
   }
   window.addEventListener('scroll', reportScroll, true);
   window.addEventListener('resize', reportScroll, true);
-  layer.addEventListener('mousemove', function (event) {
+  function onHover(event) {
     if (frozen || capturing || picker.isDragging()) return;
+    if (event.target instanceof Element && event.target.closest('[data-dsh-annotate]')) return;
     show(hit(event.clientX, event.clientY));
-  });
-  layer.addEventListener('mousedown', function (event) { event.preventDefault(); event.stopPropagation(); }, true);
-  layer.addEventListener('click', function (event) { event.preventDefault(); event.stopImmediatePropagation(); }, true);
+  }
+  function onDown(event) { event.preventDefault(); event.stopImmediatePropagation(); }
+  function onClick(event) { event.preventDefault(); event.stopImmediatePropagation(); }
+  function onContext(event) { event.preventDefault(); }
+  document.addEventListener('mousemove', onHover, true);
+  document.addEventListener('mousedown', onDown, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('contextmenu', onContext, true);
+  var cursorStyle = document.createElement('style');
+  cursorStyle.setAttribute('data-dsh-annotate', '1');
+  cursorStyle.textContent = 'html,html *{cursor:crosshair !important}';
+  document.documentElement.appendChild(cursorStyle);
   function pickElement(point) {
     if (frozen || capturing) return;
     var el = hit(point.x, point.y);
     if (!el) return;
     frozen = true;
     frozenEl = el;
+    var id = instance + ':' + String(++pickSeq);
+    picks.push({ id: id, el: el });
     var info = describe(el);
     info.kind = 'pick';
+    info.id = id;
     info.viewport = viewport();
     info.scroll = { x: window.scrollX, y: window.scrollY };
     try { console.log(MARK + JSON.stringify(info)); } catch (error) {}
   }
-  picker = installRegionPicker(layer, {
+  picker = installRegionPicker(document, {
     ignore: function () { return false; },
     blocked: function () { return frozen || capturing; },
     bounds: viewport,
@@ -2765,7 +2793,12 @@ var require_guest = __commonJS({
       picker.destroy();
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('blur', onBlur);
-      try { layer.remove(); box.remove(); label.remove(); } catch (error) {}
+      document.removeEventListener('mousemove', onHover, true);
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('click', onClick, true);
+      document.removeEventListener('contextmenu', onContext, true);
+      picks = [];
+      try { layer.remove(); box.remove(); label.remove(); cursorStyle.remove(); } catch (error) {}
       window.removeEventListener('scroll', reportScroll, true);
       window.removeEventListener('resize', reportScroll, true);
       window.__dshAnnotate = null;
@@ -2800,7 +2833,8 @@ var { MARK, GUEST_INSTALL, GUEST_REMOVE, GUEST_FREEZE, GUEST_RESUME } = require_
 var NS = "annotateAnything";
 var UI = "[data-annot-ui]";
 var CSS2 = `
-.dsh-annot-trigger{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
+.dsh-annot-trigger{position:relative;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;flex:none}
+.dsh-annot-trigger__badge{position:absolute;top:-2px;right:-3px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground,#fff);font:600 9px/13px system-ui,sans-serif;text-align:center}
 .dsh-annot-trigger:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
 .dsh-annot-trigger--active{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent);color:var(--dsw-alias-brand-primary)}
 .dsh-annot-layer{position:fixed;inset:0;z-index:9000;pointer-events:none}
@@ -2838,7 +2872,7 @@ var ICON = React.createElement(
   React.createElement("circle", { cx: 8, cy: 6.5, r: 1.6, fill: "currentColor" })
 );
 function createStore() {
-  let state = { active: false, sessionId: void 0 };
+  let state = { active: false, sessionId: void 0, count: 0 };
   const listeners = /* @__PURE__ */ new Set();
   return {
     get: () => state,
@@ -2872,12 +2906,13 @@ function Trigger({ props, store, t }) {
       type: "button",
       "data-annot-ui": "trigger",
       className: "dsh-annot-trigger" + (state.active ? " dsh-annot-trigger--active" : ""),
-      title: t("trigger.title"),
+      title: state.count > 0 ? t("trigger.titleCount", { count: state.count }) : t("trigger.title"),
       "aria-label": t("trigger.title"),
       "aria-pressed": state.active,
       onClick: () => store.set({ active: !state.active })
     },
-    ICON
+    ICON,
+    state.count > 0 && !state.active ? React.createElement("span", { className: "dsh-annot-trigger__badge" }, String(state.count)) : null
   );
 }
 function Overlay({ ctx, store, t }) {
@@ -2902,6 +2937,9 @@ function Overlay({ ctx, store, t }) {
   };
   draftRef.current = draft;
   itemsRef.current = items;
+  React.useEffect(() => {
+    store.set({ count: items.length });
+  }, [items.length]);
   const isActive = state.active;
   const pickAt = (x, y) => {
     const list = document.elementsFromPoint(x, y);
@@ -2924,8 +2962,15 @@ function Overlay({ ctx, store, t }) {
       height: docRect.height * sy
     };
   };
+  const guestLiveRect = (wv, rect, viewport) => {
+    const outer = wv.getBoundingClientRect();
+    const sx = viewport && viewport.width > 0 ? outer.width / viewport.width : 1;
+    const sy = viewport && viewport.height > 0 ? outer.height / viewport.height : 1;
+    return { x: outer.left + rect.x * sx, y: outer.top + rect.y * sy, width: rect.width * sx, height: rect.height * sy };
+  };
   const itemRect = (item) => {
     if (item.kind === "region" && item.epoch !== epochRef.current) return null;
+    if (item.wv && item.liveRect) return guestLiveRect(item.wv, item.liveRect, item.guestViewport);
     if (item.wv && item.docRect) return guestViewportRect(item.wv, item.docRect, item.guestViewport);
     if (item.wv && item.guestRect) {
       const outer = item.wv.getBoundingClientRect();
@@ -2940,6 +2985,7 @@ function Overlay({ ctx, store, t }) {
   const draftRectOf = (value) => {
     if (!value) return null;
     if (value.kind === "region" && value.epoch !== epochRef.current) return null;
+    if (value.wv && value.liveRect) return guestLiveRect(value.wv, value.liveRect, value.guestViewport);
     if (value.wv && value.docRect) return guestViewportRect(value.wv, value.docRect, value.guestViewport);
     if (value.el && value.el.isConnected) {
       const rect = value.el.getBoundingClientRect();
@@ -3015,6 +3061,8 @@ function Overlay({ ctx, store, t }) {
       desc: { tag: payload.tag, label: payload.label, text: payload.text, selector: payload.selector, rect: payload.rect },
       el: null,
       wv,
+      guestId: payload.id,
+      liveRect: payload.rect,
       guestRect: payload.rect,
       guestViewport: payload.viewport,
       docRect,
@@ -3093,8 +3141,13 @@ function Overlay({ ctx, store, t }) {
       event.preventDefault();
       event.stopImmediatePropagation();
       if (regionPickerRef.current?.cancel()) return;
-      if (draftRef.current) setDraft(null);
-      else store.set({ active: false });
+      const current = draftRef.current;
+      if (current) {
+        if (current.editing || current.capturePending) setDraft(null);
+        else saveDraft();
+        return;
+      }
+      store.set({ active: false });
     };
     const invalidate = () => {
       epochRef.current += 1;
@@ -3163,6 +3216,18 @@ function Overlay({ ctx, store, t }) {
               setTick((value) => value + 1);
               return;
             }
+            if (payload && payload.kind === "move") {
+              const id = typeof payload.id === "string" ? payload.id : "";
+              const rect3 = payload.rect;
+              const viewport2 = payload.viewport;
+              if (!id || !rect3 || !viewport2) return;
+              const next = { id, rect: rect3, viewport: viewport2 };
+              setItems((prev) => prev.some((entry) => entry.guestId === id) ? prev.map((entry) => entry.guestId === id ? Object.assign({}, entry, { liveRect: next.rect, guestViewport: next.viewport }) : entry) : prev);
+              if (draftRef.current && draftRef.current.guestId === id) {
+                setDraft(Object.assign({}, draftRef.current, { liveRect: next.rect, guestViewport: next.viewport }));
+              }
+              return;
+            }
             if (!payload || !["pick", "region"].includes(payload.kind)) return;
             const viewport = payload.viewport;
             if (!viewport || typeof viewport.instance !== "string" || !["width", "height", "x", "y", "revision"].every((key) => Number.isFinite(viewport[key]))) return;
@@ -3223,7 +3288,6 @@ function Overlay({ ctx, store, t }) {
   React.useEffect(() => {
     if (!isActive) {
       setDraft(null);
-      setItems([]);
       setHover(null);
     }
   }, [isActive]);
@@ -3302,13 +3366,12 @@ function Overlay({ ctx, store, t }) {
       ] : []),
       React.createElement("button", { key: "send", className: "dsh-annot-btn dsh-annot-btn--primary", disabled: items.length === 0 || busy || !!draft, onClick: send }, busy ? t("bar.sending") : t("bar.send", { count: items.length })),
       React.createElement("button", { key: "close", className: "dsh-annot-btn", onClick: () => {
-        setItems([]);
         setDraft(null);
         store.set({ active: false });
       } }, t("bar.close"))
     )
   );
-  const frozen = draft ? boxOf(draftRectOf(draft)) : null;
+  const frozen = draft && !(draft.wv && draft.kind !== "region") ? boxOf(draftRectOf(draft)) : null;
   if (draft && frozen) {
     const label = clip(draft.desc && (draft.desc.label || draft.desc.tag) || "", 60);
     children.push(React.createElement("div", { key: "frozen", className: "dsh-annot-hover", style: { left: frozen.x, top: frozen.y, width: frozen.width, height: frozen.height } }));
@@ -3433,6 +3496,7 @@ function apply(ctx) {
 }
 var DICT_EN = {
   "trigger.title": "Annotate",
+  "trigger.titleCount": "Annotate \u2014 {count} kept",
   "bar.hint": "Click an element or drag a region",
   "region.label": "Selected region",
   "bar.capturing": "Capturing\u2026",
@@ -3468,6 +3532,7 @@ var DICT_EN = {
 };
 var DICT_RU = {
   "trigger.title": "\u0410\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
+  "trigger.titleCount": "\u0410\u043D\u043D\u043E\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u2014 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E {count}",
   "bar.hint": "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \u043D\u0430 \u044D\u043B\u0435\u043C\u0435\u043D\u0442 \u0438\u043B\u0438 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u043E\u0431\u043B\u0430\u0441\u0442\u044C \u043F\u0435\u0440\u0435\u0442\u0430\u0441\u043A\u0438\u0432\u0430\u043D\u0438\u0435\u043C",
   "region.label": "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u0430\u044F \u043E\u0431\u043B\u0430\u0441\u0442\u044C",
   "bar.capturing": "\u0421\u043D\u0438\u043C\u043E\u043A\u2026",
